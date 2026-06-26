@@ -1,0 +1,19 @@
+{
+  "boName": "GoodsIssue",
+  "version": "2026-06-24",
+  "note": "示例 allowlist；P0 console 默认 diff 全部捕获字段，手动设置见 README",
+  "fields": [
+    {
+      "path": "main.exchangeRate",
+      "stateType": "disabled",
+      "configKey": "__exchange_rate__",
+      "oldEntry": "goodsIssue-validator-useable.ts"
+    },
+    {
+      "path": "goodsItems.{uuid}.warehouseId",
+      "stateType": "disabled",
+      "configKey": "warehouseId",
+      "oldEntry": "goodsIssue-validator-useable.ts"
+    }
+  ]
+}
