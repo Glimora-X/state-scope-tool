@@ -1,8 +1,8 @@
 {
   "name": "state-scope-tool",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "StateScope · 单据状态 L2 shadow 透视 Chrome 扩展（P0 console）",
+  "description": "StateScope · 单据状态 L2 shadow 透视 Chrome 扩展（P1.5 场景回归）",
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch"

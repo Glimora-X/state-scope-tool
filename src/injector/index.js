@@ -18,19 +18,60 @@ import { wrapGetDisable } from './wrap-lowcode.js';
 import { wrapFormController } from './wrap-consume.js';
 import { installDebugApi } from './debug-store.js';
 import { scopeLog } from './safe-log.js';
+import { buildAllowlistPathSet } from './allowlist-config.js';
+import { getScenarioCatalog, getScenarioTag, setScenarioTag } from './scenario-context.js';
+import { buildRuntimePayload } from './panel-payload.js';
+import { getPanelSyncPayload, publishRuntimeToPanel, republishCachedPanelState } from './panel-post.js';
 
 const allowlistCache = new Map();
+const allowlistConfigCache = new Map();
 let epochManager = null;
 let runtimeContext = {};
 let installed = false;
 
-console.info(`${LOG_PREFIX} injector loaded (P0 console). Set localStorage.bizDebug='true' and refresh.`);
+console.info(`${LOG_PREFIX} injector loaded (P0.6 panel). Set localStorage.bizDebug='true' and refresh.`);
 
-function getAllowlist(boName) {
+function getAllowlistPathSet(boName) {
   if (!boName) {
     return undefined;
   }
   return allowlistCache.get(boName);
+}
+
+function getAllowlistConfig(boName) {
+  if (!boName) {
+    return undefined;
+  }
+  return allowlistConfigCache.get(boName);
+}
+
+function applyAllowlistConfig(config) {
+  if (!config?.boName) {
+    return false;
+  }
+  allowlistConfigCache.set(config.boName, config);
+  allowlistCache.set(config.boName, buildAllowlistPathSet(config));
+  scopeLog(`${LOG_PREFIX} allowlist loaded: ${config.boName} v${config.version || '?'} (${config.fields?.length || 0} fields)`);
+  return true;
+}
+
+function isAutoAllowlistEnabled() {
+  try {
+    return localStorage.getItem('stateScopeAutoAllowlist') !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function clearAllowlist(boName) {
+  const target = boName || getRuntimeMeta(runtimeContext).boName;
+  if (!target) {
+    return false;
+  }
+  allowlistCache.delete(target);
+  allowlistConfigCache.delete(target);
+  scopeLog(`${LOG_PREFIX} allowlist cleared: ${target} (Diff 恢复全量)`);
+  return true;
 }
 
 function ensureEpochManager() {
@@ -42,8 +83,9 @@ function ensureEpochManager() {
     reportEpochToConsole(
       epoch,
       getRuntimeMeta(runtimeContext),
-      getAllowlist(getRuntimeMeta(runtimeContext).boName)
+      getAllowlistConfig(getRuntimeMeta(runtimeContext).boName)
     );
+    publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
   });
 
   return epochManager;
@@ -93,8 +135,8 @@ function markInstalled() {
 
   window.__StateScope__ = {
     installed: true,
-    version: '0.1.9',
-    mode: 'P0-console',
+    version: '0.5.2',
+    mode: 'P1.5-scenario',
     getMeta: () => getRuntimeMeta(runtimeContext),
     getDiagnostics: () => getActivationDiagnostics(runtimeContext),
     rediscover: () => {
@@ -102,14 +144,36 @@ function markInstalled() {
       installHooks();
       return getRuntimeMeta(runtimeContext);
     },
-    getAllowlist: () => getAllowlist(meta.boName),
+    getAllowlist: () => getAllowlistPathSet(meta.boName),
+    getAllowlistConfig: () => getAllowlistConfig(meta.boName),
+    applyAllowlistConfig(config) {
+      return applyAllowlistConfig(config);
+    },
+    clearAllowlist(boName) {
+      return clearAllowlist(boName);
+    },
+    isAutoAllowlistEnabled: () => isAutoAllowlistEnabled(),
+    setAutoAllowlistEnabled(enabled) {
+      localStorage.setItem('stateScopeAutoAllowlist', enabled ? 'true' : 'false');
+      if (!enabled) {
+        clearAllowlist(getRuntimeMeta(runtimeContext).boName);
+      }
+      return isAutoAllowlistEnabled();
+    },
+    getScenarioTag: () => getScenarioTag(),
+    setScenarioTag: (tag) => setScenarioTag(tag),
+    getScenarioCatalog: () => getScenarioCatalog(),
     setAllowlist(boName, paths) {
       allowlistCache.set(boName, new Set(Array.isArray(paths) ? paths : []));
     },
-    forceFinalize: () => ensureEpochManager().finalizeEpoch()
+    forceFinalize: () => ensureEpochManager().finalizeEpoch(),
+    getPanelSyncPayload: () => getPanelSyncPayload(),
+    syncPanelState: () => republishCachedPanelState(),
+    extensionRelayBroken: false
   };
 
   installDebugApi(window, scopeLog);
+  publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
 
   console.info(
     `${LOG_PREFIX} active | boName=${meta.boName || '(unknown)'} | profile=${meta.profile} | route=${meta.route}`
@@ -209,5 +273,28 @@ function startPolling() {
     }
   }, 500);
 }
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window) {
+    return;
+  }
+  if (event.data?.channel === 'StateScopeAllowlist' && event.data.config) {
+    if (isAutoAllowlistEnabled()) {
+      applyAllowlistConfig(event.data.config);
+    }
+  }
+  if (event.data?.channel === 'StateScopeAllowlistClear') {
+    clearAllowlist(event.data.boName);
+  }
+  if (event.data?.channel === 'StateScopeExtensionAck' && window.__StateScope__) {
+    if (event.data.ok === false) {
+      window.__StateScope__.extensionRelayBroken = true;
+      window.__StateScope__.extensionRelayError = event.data.error || 'relay failed';
+    } else {
+      window.__StateScope__.extensionRelayBroken = false;
+      window.__StateScope__.extensionRelayError = '';
+    }
+  }
+});
 
 startPolling();

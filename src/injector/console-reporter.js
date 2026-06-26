@@ -1,8 +1,18 @@
+import { buildAllowlistPathSet } from './allowlist-config.js';
 import { diffSnapshots, SEVERITY } from './diff.js';
 import { isVerboseMode } from './path-filter.js';
 import { formatGroupTitle, formatScopeLine, formatDetailPathHint } from './legacy-diagnostics.js';
 import { isDebugMode, storeEpoch } from './debug-store.js';
 import { scopeLog, scopeLogBlock } from './safe-log.js';
+import { buildPanelEpochPayload } from './panel-payload.js';
+import { publishEpochToPanel } from './panel-post.js';
+import {
+  buildChangedSetFinalSnap,
+  formatValLong,
+  hasDetailKeys,
+  pickDetailKeys,
+  pickMainKeys
+} from './snap-view.js';
 
 let epochCounter = 0;
 const MAX_DETAIL_LINES = 12;
@@ -95,7 +105,7 @@ function buildResultLines(snap, maxLines) {
 
   for (let i = 0; i < limit; i += 1) {
     const key = keys[i];
-    lines.push(`${key} = ${formatVal(snap[key])}`);
+      lines.push(`${key} = ${formatValLong(snap[key])}`);
   }
   if (keys.length > limit) {
     lines.push(`… +${keys.length - limit} more (stateScopeVerbose=true)`);
@@ -113,9 +123,11 @@ function printSnapSection(label, snap) {
   return keys.length;
 }
 
-export function reportEpochToConsole(epoch, meta, allowlist) {
+export function reportEpochToConsole(epoch, meta, allowlistConfig) {
   storeEpoch(epoch, meta);
+  publishEpochToPanel(buildPanelEpochPayload(epoch, meta, allowlistConfig));
 
+  const allowlist = allowlistConfig ? buildAllowlistPathSet(allowlistConfig) : undefined;
   const diffs = diffSnapshots(epoch.oldSnap, epoch.newSnap, allowlist);
   const mismatches = diffs.filter((item) => item.severity !== SEVERITY.OK);
   const logicMismatches = mismatches.filter((item) => item.severity === SEVERITY.LOGIC_MISMATCH);
@@ -212,62 +224,8 @@ export function reportEpochToConsole(epoch, meta, allowlist) {
   }
 }
 
-function buildChangedSetFinalSnap(finalSnap, changedSample) {
-  const display = {};
-  for (const key of Object.keys(changedSample || {})) {
-    if (finalSnap?.[key] !== undefined) {
-      display[key] = finalSnap[key];
-    } else if (changedSample[key] !== undefined) {
-      display[key] = changedSample[key];
-    }
-  }
-  return display;
-}
-
-function pickMainKeys(snap) {
-  const picked = {};
-  for (const [key, value] of Object.entries(snap)) {
-    if (key.startsWith('main.') && key.split('.').length === 3) {
-      picked[key] = value;
-    }
-  }
-  return picked;
-}
-
-function pickDetailKeys(snap, changedSample) {
-  const prefixes = new Set();
-  for (const key of Object.keys(changedSample)) {
-    const parts = key.split('.');
-    if (parts.length >= 3 && parts[0] !== 'main') {
-      prefixes.add(`${parts[0]}.${parts[1]}`);
-    }
-  }
-
-  const picked = {};
-  for (const [key, value] of Object.entries(snap)) {
-    const prefix = key.split('.').slice(0, 2).join('.');
-    if (prefixes.has(prefix)) {
-      picked[key] = value;
-    }
-  }
-  return picked;
-}
-
-function hasDetailKeys(finalSnap, changedSample) {
-  return Object.keys(changedSample).some((key) => !key.startsWith('main.'));
-}
-
 function formatVal(value) {
-  if (value === undefined) {
-    return '—';
-  }
-  if (value === true) {
-    return 'true (disabled/不可编辑)';
-  }
-  if (value === false) {
-    return 'false (enabled/可编辑)';
-  }
-  return String(value);
+  return formatValLong(value);
 }
 
 export { SEVERITY };

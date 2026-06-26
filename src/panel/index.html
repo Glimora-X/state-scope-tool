@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>StateScope Panel</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-wrap">
+        <span class="brand-mark">SS</span>
+        <span class="brand">StateScope</span>
+        <span id="activation-badge" class="status-badge">—</span>
+      </div>
+      <div id="header-meta" class="header-meta"></div>
+    </header>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <nav class="sidebar-nav" id="sidebar-nav">
+          <button type="button" class="nav-item active" data-tab="overview">概览</button>
+          <button type="button" class="nav-item" data-tab="timeline">Epoch 时间线</button>
+          <button type="button" class="nav-item" data-tab="diff">Diff 对比</button>
+          <button type="button" class="nav-item" data-tab="cutover">
+            切流报告 <span class="nav-badge" id="cutover-nav-badge"></span>
+          </button>
+          <button type="button" class="nav-item" data-tab="scenarios">
+            场景回归 <span class="nav-badge" id="scenario-nav-badge"></span>
+          </button>
+          <button type="button" class="nav-item" data-tab="issues">
+            Issues <span class="nav-badge" id="issues-nav-badge"></span>
+          </button>
+          <button type="button" class="nav-item" data-tab="settings">设置</button>
+        </nav>
+        <div id="sidebar-footer" class="sidebar-footer"></div>
+      </aside>
+      <main id="app" class="main"></main>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+    <script src="scenario-ui.js"></script>
+    <script src="issues-ui.js"></script>
+    <script src="panel.js"></script>
+  </body>
+</html>
