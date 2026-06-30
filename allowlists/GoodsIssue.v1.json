@@ -1,0 +1,18 @@
+{
+  "boName": "GoodsIssue",
+  "version": "2026-06-29-pilot",
+  "note": "销货单试点批次 · 与 app-service-plus goodsIssueStateRulesConfig 对齐",
+  "fields": [
+    { "path": "main.isOffsetReturn", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "main.isOffsetReturn", "stateType": "disabled", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-useable.ts" },
+    { "path": "main.exchangeRate", "stateType": "disabled", "configKey": "goodsIssue", "oldEntry": "common-validator useableERateMainField" },
+    { "path": "main.currencyId", "stateType": "disabled", "configKey": "goodsIssue", "oldEntry": "common-validator useableCurrencyIdMainField" },
+    { "path": "goodsItems.{uuid}.netPriceWithoutTax", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "goodsItems.{uuid}.netAmountWithoutTax", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "goodsItems.{uuid}.taxPct", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "goodsItems.{uuid}.netTax", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "goodsItems.{uuid}.trans2Qty", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "goodsItems.{uuid}.trans2UomId", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" },
+    { "path": "goodsItems.{uuid}.promoUsedStatusEnum", "stateType": "visible", "configKey": "goodsIssue", "oldEntry": "goodsIssue-validator-visible.ts" }
+  ]
+}

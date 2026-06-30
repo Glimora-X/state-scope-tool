@@ -50,8 +50,15 @@ export function detectProfile(context = {}) {
 
 export function getRuntimeMeta(context = {}) {
   const bizApplication = context.bizApplication || window.bizApplication;
+  const presenter = context.presenter;
   return {
-    boName: context.boName || getBoName(bizApplication),
+    boName:
+      context.boName ||
+      getBoName(bizApplication) ||
+      presenter?.voucherBoName ||
+      presenter?.boName ||
+      context.formController?.presenter?.voucherBoName ||
+      '',
     action: getAction(bizApplication, context.presenter),
     route: getRouteHint(),
     profile: detectProfile(context)

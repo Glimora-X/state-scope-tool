@@ -21,7 +21,7 @@ export function wrapFormController(formController, epochManager) {
     return false;
   }
 
-  formController.refreshView = function refreshViewWrapped(changedFields, validateInfo, result) {
+  formController.refreshView = function refreshViewWrapped(changedFields, validateInfo, statePatches) {
     const uiState = formController.presenter?.controllers?.uiStateController;
     const presenter = formController.presenter;
 
@@ -29,14 +29,14 @@ export function wrapFormController(formController, epochManager) {
       installLegacyDiagnostics(uiState, presenter, formController);
     }
 
-    const response = original(changedFields, validateInfo, result);
+    const response = original(changedFields, validateInfo, statePatches);
     const scope = mergeScope(
       takeScopeDiagnostics(),
       summarizeChangeScope(changedFields, presenter, formController)
     );
 
     const hasOld = changedFields && uiState;
-    const hasNew = result?.statePatches && Object.keys(result.statePatches).length > 0;
+    const hasNew = statePatches && Object.keys(statePatches).length > 0;
     if (!hasOld && !hasNew) {
       return response;
     }
@@ -56,7 +56,7 @@ export function wrapFormController(formController, epochManager) {
     }
 
     if (hasNew) {
-      epochManager.recordNew(filterTopLevelEntries(flattenStatePatches(result.statePatches)));
+      epochManager.recordNew(filterTopLevelEntries(flattenStatePatches(statePatches)));
     }
 
     epochManager.commitEpoch();

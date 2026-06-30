@@ -240,6 +240,7 @@ async function readPageSettings() {
     allowlistActive: !!(window.__StateScope__?.getAllowlistConfig?.()),
     allowlistFieldCount: window.__StateScope__?.getAllowlistConfig?.()?.fields?.length || 0,
     allowlistVersion: window.__StateScope__?.getAllowlistConfig?.()?.version || '',
+    loadedAllowlistKeys: window.__StateScope__?.listLoadedAllowlists?.() || [],
     pageMeta: window.__StateScope__?.getMeta?.() || null,
     pageSync: window.__StateScope__?.getPanelSyncPayload?.() || null,
     relayBroken: window.__StateScope__?.extensionRelayBroken === true,
@@ -376,18 +377,34 @@ function getCutoverVerdict(report) {
   };
 }
 
+async function resolveBoNameForAllowlist() {
+  const fromRuntime = appState?.runtime?.meta?.boName;
+  if (fromRuntime && fromRuntime !== '(unknown)') {
+    return fromRuntime;
+  }
+  const fromPage = ui.pageSettings?.pageMeta?.boName;
+  if (fromPage) {
+    return fromPage;
+  }
+  const metaResult = await evalInPage(`window.__StateScope__?.getMeta?.()?.boName || ''`);
+  return metaResult.ok ? metaResult.result || '' : '';
+}
+
 async function syncAllowlistToPage({ force = false } = {}) {
   const ps = ui.pageSettings;
   if (!force && ps && ps.stateScopeAutoAllowlist === false) {
-    return;
+    return { ok: false, reason: 'auto-disabled' };
   }
 
-  const boName = appState?.runtime?.meta?.boName;
-  if (!boName || boName === ui.lastSyncedBoName) {
-    return;
+  const boName = await resolveBoNameForAllowlist();
+  if (!force && boName && boName === ui.lastSyncedBoName && ps?.allowlistActive) {
+    return { ok: true, reason: 'already-synced' };
   }
 
-  const candidates = [`${boName}.v1.example.json`, 'GoodsIssue.v1.example.json'];
+  const candidates = boName ?
+      [`${boName}.v1.json`, `${boName}.v1.example.json`, 'GoodsIssue.v1.json', 'GoodsIssue.v1.example.json']
+    : ['GoodsIssue.v1.json', 'GoodsIssue.v1.example.json'];
+
   for (const fileName of candidates) {
     try {
       const url = chrome.runtime.getURL(`allowlists/${fileName}`);
@@ -396,24 +413,45 @@ async function syncAllowlistToPage({ force = false } = {}) {
         continue;
       }
       const config = await response.json();
-      if (config.boName && config.boName !== boName) {
+      if (boName && config.boName && config.boName !== boName) {
         continue;
       }
       const payload = JSON.stringify(config);
       const evalResult = await evalInPage(
         `(function (config) {
-          if (!window.__StateScope__?.applyAllowlistConfig) return { ok: false };
-          return { ok: window.__StateScope__.applyAllowlistConfig(config), version: config.version };
+          if (!window.__StateScope__?.applyAllowlistConfig) {
+            return { ok: false, error: 'injector 未就绪' };
+          }
+          const applied = window.__StateScope__.applyAllowlistConfig(config);
+          const active = !!window.__StateScope__.getAllowlistConfig?.();
+          return {
+            ok: applied,
+            active,
+            version: config.version,
+            fieldCount: config.fields?.length || 0,
+            boName: config.boName
+          };
         })(${payload})`
       );
       if (evalResult.ok && evalResult.result?.ok) {
-        ui.lastSyncedBoName = boName;
+        ui.lastSyncedBoName = config.boName || boName || ui.lastSyncedBoName;
+        ui.settingsMessage = evalResult.result.active ?
+            `allowlist 已绑定：${evalResult.result.boName} v${evalResult.result.version}（${evalResult.result.fieldCount} 字段）`
+          : `allowlist 已写入但未激活，boName=${evalResult.result.boName || '?'}`;
+        return { ok: true, ...evalResult.result };
       }
-      return;
+      if (evalResult.result?.error) {
+        ui.settingsMessage = evalResult.result.error;
+      }
     } catch {
       // try next candidate
     }
   }
+
+  ui.settingsMessage = boName ?
+      `未找到 ${boName} 的 allowlist 文件（allowlists/*.json）`
+    : '未识别 boName，且默认 GoodsIssue allowlist 加载失败';
+  return { ok: false, reason: 'not-found' };
 }
 
 function cutoverRowsToCsv(report) {
@@ -1345,8 +1383,10 @@ function renderSettings() {
   }).join('');
 
   const allowlistStatus = ps.allowlistActive ?
-      `已加载 · ${ps.allowlistFieldCount || 0} 字段${ps.allowlistVersion ? ` · v${ps.allowlistVersion}` : ''}`
-    : '未加载（Diff 全量）';
+      `已绑定 · ${ps.allowlistFieldCount || 0} 字段${ps.allowlistVersion ? ` · v${ps.allowlistVersion}` : ''}`
+    : ps.loadedAllowlistKeys?.length ?
+        `已写入 cache [${ps.loadedAllowlistKeys.join(', ')}] 但未匹配当前 boName`
+      : '未绑定（Diff 全量）';
   const autoAllowlistOn = ps.stateScopeAutoAllowlist !== false;
 
   const msg = ui.settingsMessage ?
@@ -1530,9 +1570,11 @@ function bindAppEvents() {
   document.getElementById('reset-cutover')?.addEventListener('click', resetCutoverReport);
   document.getElementById('resync-allowlist')?.addEventListener('click', async () => {
     ui.lastSyncedBoName = null;
-    await syncAllowlistToPage({ force: true });
+    const result = await syncAllowlistToPage({ force: true });
     await readPageSettings();
-    showToast('已尝试重新加载 allowlist');
+    showToast(result.ok ? ui.settingsMessage || 'allowlist 已绑定' : ui.settingsMessage || 'allowlist 加载失败');
+    renderApp();
+    bindAppEvents();
   });
 
   document.getElementById('clear-allowlist')?.addEventListener('click', async () => {
@@ -1550,9 +1592,11 @@ function bindAppEvents() {
 
   document.getElementById('resync-allowlist-settings')?.addEventListener('click', async () => {
     ui.lastSyncedBoName = null;
-    await syncAllowlistToPage({ force: true });
+    const result = await syncAllowlistToPage({ force: true });
     await readPageSettings();
-    ui.settingsMessage = '已手动重新加载 allowlist。';
+    if (!result.ok && !ui.settingsMessage) {
+      ui.settingsMessage = 'allowlist 加载失败，请确认扩展已 reload 且 allowlists/GoodsIssue.v1.json 存在';
+    }
     renderApp();
     bindAppEvents();
   });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "StateScope",
-  "version": "0.5.2",
+  "version": "0.5.6",
   "description": "单据状态 L2 shadow 透视 Chrome 扩展（P1.5 场景回归 + Issues）",
   "icons": {},
   "devtools_page": "src/devtools/devtools.html",

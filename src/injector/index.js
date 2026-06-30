@@ -19,6 +19,7 @@ import { wrapFormController } from './wrap-consume.js';
 import { installDebugApi } from './debug-store.js';
 import { scopeLog } from './safe-log.js';
 import { buildAllowlistPathSet } from './allowlist-config.js';
+import { getBundledAllowlist } from './bundled-allowlists.js';
 import { getScenarioCatalog, getScenarioTag, setScenarioTag } from './scenario-context.js';
 import { buildRuntimePayload } from './panel-payload.js';
 import { getPanelSyncPayload, publishRuntimeToPanel, republishCachedPanelState } from './panel-post.js';
@@ -31,18 +32,26 @@ let installed = false;
 
 console.info(`${LOG_PREFIX} injector loaded (P0.6 panel). Set localStorage.bizDebug='true' and refresh.`);
 
-function getAllowlistPathSet(boName) {
-  if (!boName) {
-    return undefined;
+function resolveAllowlistConfig(boName) {
+  if (boName && allowlistConfigCache.has(boName)) {
+    return allowlistConfigCache.get(boName);
   }
-  return allowlistCache.get(boName);
+  if (allowlistConfigCache.size === 1) {
+    return [...allowlistConfigCache.values()][0];
+  }
+  if (!boName && allowlistConfigCache.has('GoodsIssue')) {
+    return allowlistConfigCache.get('GoodsIssue');
+  }
+  return undefined;
 }
 
-function getAllowlistConfig(boName) {
-  if (!boName) {
-    return undefined;
-  }
-  return allowlistConfigCache.get(boName);
+function resolveAllowlistPathSet(boName) {
+  const config = resolveAllowlistConfig(boName);
+  return config ? allowlistCache.get(config.boName) : undefined;
+}
+
+function getAllowlistConfigForRuntime() {
+  return resolveAllowlistConfig(getRuntimeMeta(runtimeContext).boName);
 }
 
 function applyAllowlistConfig(config) {
@@ -52,7 +61,84 @@ function applyAllowlistConfig(config) {
   allowlistConfigCache.set(config.boName, config);
   allowlistCache.set(config.boName, buildAllowlistPathSet(config));
   scopeLog(`${LOG_PREFIX} allowlist loaded: ${config.boName} v${config.version || '?'} (${config.fields?.length || 0} fields)`);
+  try {
+    window.postMessage(
+      {
+        channel: 'StateScopeInternal',
+        type: 'allowlistAck',
+        boName: config.boName,
+        version: config.version || ''
+      },
+      '*'
+    );
+  } catch {
+    // ignore
+  }
   return true;
+}
+
+function readAllowlistFromDom() {
+  try {
+    const raw = document.documentElement?.getAttribute('data-state-scope-allowlist');
+    if (!raw) {
+      return false;
+    }
+    return applyAllowlistConfig(JSON.parse(raw));
+  } catch {
+    return false;
+  }
+}
+
+function bootstrapAllowlists() {
+  if (!isAutoAllowlistEnabled()) {
+    return { source: 'disabled', applied: false };
+  }
+
+  readAllowlistFromDom();
+  drainPendingAllowlists();
+
+  if (allowlistConfigCache.size > 0) {
+    return { source: 'cache', applied: true, keys: [...allowlistConfigCache.keys()] };
+  }
+
+  refreshRuntimeTargets();
+  const boName = getRuntimeMeta(runtimeContext).boName;
+  const bundled = getBundledAllowlist(boName) || getBundledAllowlist('GoodsIssue');
+  if (bundled) {
+    applyAllowlistConfig(bundled);
+    return { source: 'bundled', applied: true, boName: bundled.boName };
+  }
+
+  return { source: 'none', applied: false };
+}
+
+function requestAllowlistFromBridge() {
+  if (!isAutoAllowlistEnabled()) {
+    return;
+  }
+  try {
+    window.postMessage({ channel: 'StateScopeInternal', type: 'requestAllowlist' }, '*');
+  } catch {
+    // ignore
+  }
+}
+
+function drainPendingAllowlists() {
+  if (!isAutoAllowlistEnabled()) {
+    return 0;
+  }
+  const pending = window.__StateScopePendingAllowlists__;
+  if (!Array.isArray(pending) || !pending.length) {
+    return 0;
+  }
+  let applied = 0;
+  while (pending.length) {
+    const config = pending.shift();
+    if (applyAllowlistConfig(config)) {
+      applied += 1;
+    }
+  }
+  return applied;
 }
 
 function isAutoAllowlistEnabled() {
@@ -83,7 +169,7 @@ function ensureEpochManager() {
     reportEpochToConsole(
       epoch,
       getRuntimeMeta(runtimeContext),
-      getAllowlistConfig(getRuntimeMeta(runtimeContext).boName)
+      getAllowlistConfigForRuntime()
     );
     publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
   });
@@ -135,19 +221,32 @@ function markInstalled() {
 
   window.__StateScope__ = {
     installed: true,
-    version: '0.5.2',
+    version: '0.5.6',
     mode: 'P1.5-scenario',
     getMeta: () => getRuntimeMeta(runtimeContext),
     getDiagnostics: () => getActivationDiagnostics(runtimeContext),
     rediscover: () => {
       refreshRuntimeTargets();
       installHooks();
+      bootstrapAllowlists();
       return getRuntimeMeta(runtimeContext);
     },
-    getAllowlist: () => getAllowlistPathSet(meta.boName),
-    getAllowlistConfig: () => getAllowlistConfig(meta.boName),
+    getAllowlist: () => resolveAllowlistPathSet(getRuntimeMeta(runtimeContext).boName),
+    getAllowlistConfig: () => getAllowlistConfigForRuntime(),
+    listLoadedAllowlists: () => [...allowlistConfigCache.keys()],
     applyAllowlistConfig(config) {
       return applyAllowlistConfig(config);
+    },
+    reloadAllowlist() {
+      readAllowlistFromDom();
+      drainPendingAllowlists();
+      requestAllowlistFromBridge();
+      const boot = bootstrapAllowlists();
+      return {
+        config: getAllowlistConfigForRuntime(),
+        loadedKeys: [...allowlistConfigCache.keys()],
+        boot
+      };
     },
     clearAllowlist(boName) {
       return clearAllowlist(boName);
@@ -173,7 +272,9 @@ function markInstalled() {
   };
 
   installDebugApi(window, scopeLog);
+  bootstrapAllowlists();
   publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
+  requestAllowlistFromBridge();
 
   console.info(
     `${LOG_PREFIX} active | boName=${meta.boName || '(unknown)'} | profile=${meta.profile} | route=${meta.route}`
@@ -297,4 +398,5 @@ window.addEventListener('message', (event) => {
   }
 });
 
+bootstrapAllowlists();
 startPolling();
