@@ -1,0 +1,89 @@
+<h2>StateScope Cockpit</h2>
+<p class="subtitle">第二部分只定义 7 个 Tab 的新层级。保留全部信息，不删能力，只改变优先级、进入时机和交互方式。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Seven Tabs · Priority and Interaction Model</div>
+  <div class="mockup-body" style="background:#0f1722;color:#dbe7f3;padding:18px">
+    <div style="display:grid;grid-template-columns:1.1fr .9fr;gap:14px">
+      <div style="display:grid;gap:14px">
+        <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+          <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Tier 1 · Primary flow</div>
+          <div style="font-size:20px;font-weight:700;margin:4px 0 12px">Daily inspection path</div>
+          <div style="display:grid;gap:10px">
+            <div style="padding:12px;border-radius:12px;background:#142234;border:1px solid #2a4967">
+              <strong>1. Overview</strong>
+              <div style="margin-top:4px;color:#9fb3c8">启动门禁、会话身份、最新证据、风险队列、快捷操作都在这里聚合。</div>
+            </div>
+            <div style="padding:12px;border-radius:12px;background:#142234;border:1px solid #2a4967">
+              <strong>2. Epoch Timeline</strong>
+              <div style="margin-top:4px;color:#9fb3c8">从概览进入单个 Epoch 的纵向调查，专注时间顺序和上下文切换。</div>
+            </div>
+            <div style="padding:12px;border-radius:12px;background:#142234;border:1px solid #2a4967">
+              <strong>3. Diff Workspace</strong>
+              <div style="margin-top:4px;color:#9fb3c8">从风险条目或时间线跳转进来，做双轨比对和字段级核查。</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+          <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Tier 2 · Extended validation</div>
+          <div style="font-size:20px;font-weight:700;margin:4px 0 12px">When the session is stable</div>
+          <div style="display:grid;gap:10px">
+            <div style="padding:12px;border-radius:12px;background:#0d1520;border:1px solid #223244">
+              <strong>4. Cutover Report</strong>
+              <div style="margin-top:4px;color:#9fb3c8">不是首页主角，但保留所有累计字段、导出和 allowlist 视角。</div>
+            </div>
+            <div style="padding:12px;border-radius:12px;background:#0d1520;border:1px solid #223244">
+              <strong>5. Scenario Regression</strong>
+              <div style="margin-top:4px;color:#9fb3c8">从“工作台”改成“任务面板”，场景步骤、PASS/BLOCK、签字都保留。</div>
+            </div>
+            <div style="padding:12px;border-radius:12px;background:#0d1520;border:1px solid #223244">
+              <strong>6. Issues</strong>
+              <div style="margin-top:4px;color:#9fb3c8">从风险升级而来，保留本地 Issue、Jira、筛选、导出，但不再和首页抢注意力。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;gap:14px">
+        <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+          <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Tier 3 · Control surface</div>
+          <div style="font-size:20px;font-weight:700;margin:4px 0 12px">Configuration and recovery</div>
+          <div style="padding:12px;border-radius:12px;background:#0d1520;border:1px solid #223244">
+            <strong>7. Settings</strong>
+            <div style="margin-top:4px;color:#9fb3c8">调试开关、Profile、Allowlist、Jira 全部保留，但默认只在“概览门禁失败”时被强提示。</div>
+          </div>
+        </div>
+
+        <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+          <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Interaction changes</div>
+          <div style="font-size:20px;font-weight:700;margin:4px 0 12px">What changes without losing data</div>
+          <div style="display:grid;gap:8px">
+            <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">把“空状态解释”改成可执行门禁卡和 CTA</div>
+            <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">把“异常列表”改成风险队列，点击后仍然跳 Diff</div>
+            <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">把“概览中的 timeline”改成压缩预览，完整调查仍去 Timeline Tab</div>
+            <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">把“场景回归和 Issues”从平铺工具页改成更明确的任务/工单面板</div>
+            <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">保留所有复制、导出、筛选、签字、同步能力，只改变入口位置和强调程度</div>
+          </div>
+        </div>
+
+        <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+          <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Navigation behavior</div>
+          <div style="font-size:20px;font-weight:700;margin:4px 0 12px">Cross-tab jumps</div>
+          <div style="display:grid;gap:8px">
+            <div style="padding:10px;border-radius:10px;background:#142234;border:1px solid #28415b">Overview risk item → Diff Workspace</div>
+            <div style="padding:10px;border-radius:10px;background:#142234;border:1px solid #28415b">Overview epoch preview → Epoch Timeline</div>
+            <div style="padding:10px;border-radius:10px;background:#142234;border:1px solid #28415b">Mismatch escalate → Issues</div>
+            <div style="padding:10px;border-radius:10px;background:#142234;border:1px solid #28415b">Scenario pass/block summary → Scenario Regression</div>
+            <div style="padding:10px;border-radius:10px;background:#142234;border:1px solid #28415b">Readiness failure → Settings exact section</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>这次只确认一个点</h3>
+  <p class="subtitle">是否接受这个 7 Tab 层级：`Overview / Timeline / Diff` 作为主工作流，`Cutover / Scenarios / Issues` 作为扩展验证，`Settings` 作为控制面？</p>
+</div>

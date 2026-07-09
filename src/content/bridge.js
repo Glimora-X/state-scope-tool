@@ -4,16 +4,50 @@
   }
   window.__stateScopeRelayInstalled__ = true;
 
+  let relayOpen = true;
+  let relayWarned = false;
+
+  function markRelayBroken(type, error) {
+    relayOpen = false;
+    try {
+      window.__StateScopeRelayBroken__ = true;
+    } catch {
+      // ignore
+    }
+    notifyRelayResult(type, false, error || 'relay disconnected');
+    if (!relayWarned) {
+      relayWarned = true;
+      console.warn(
+        '[StateScope] extension relay disconnected — 数据仍缓存在页面，请 chrome://extensions 重载扩展后 F5 单据页。'
+      );
+    }
+  }
+
   function notifyRelayResult(type, ok, error) {
-    window.postMessage(
-      {
-        channel: 'StateScopeExtensionAck',
-        ok,
-        type,
-        error: error || ''
-      },
-      '*'
-    );
+    try {
+      window.postMessage(
+        {
+          channel: 'StateScopeExtensionAck',
+          ok,
+          type,
+          error: error || ''
+        },
+        '*'
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  function canUseExtensionRuntime() {
+    if (!relayOpen) {
+      return false;
+    }
+    try {
+      return !!chrome.runtime?.id;
+    } catch {
+      return false;
+    }
   }
 
   window.addEventListener('message', (event) => {
@@ -24,6 +58,12 @@
     if (!data || data.channel !== 'StateScopeExtension') {
       return;
     }
+
+    if (!canUseExtensionRuntime()) {
+      markRelayBroken(data.type, 'extension context invalidated');
+      return;
+    }
+
     try {
       chrome.runtime.sendMessage(
         {
@@ -33,56 +73,85 @@
         () => {
           const err = chrome.runtime.lastError;
           if (err) {
-            console.warn(
-              `[StateScope] extension relay failed (${data.type}): ${err.message}. 请刷新单据页 (F5) 后重试。`
-            );
-            notifyRelayResult(data.type, false, err.message);
+            markRelayBroken(data.type, err.message);
             return;
+          }
+          relayOpen = true;
+          relayWarned = false;
+          try {
+            window.__StateScopeRelayBroken__ = false;
+          } catch {
+            // ignore
           }
           notifyRelayResult(data.type, true, '');
         }
       );
     } catch (error) {
-      console.warn('[StateScope] extension context invalidated — 请刷新单据页 (F5)', error);
-      notifyRelayResult(data.type, false, error?.message || 'extension context invalidated');
+      markRelayBroken(data.type, error?.message || 'extension context invalidated');
     }
   });
 })();
 
 (function loadDefaultAllowlist() {
-  const candidates = ['GoodsIssue.v1.json', 'GoodsIssue.v1.example.json'];
+  const ALL_FILES = ['OutsourceIssue.v1.json', 'GoodsIssue.v1.json'];
   let loading = false;
+  const deliveredBoNames = new Set();
 
-  /** DOM 属性：跨 content script ↔ MAIN world，不受 CSP 内联脚本限制 */
-  function deliverAllowlistToPage(config) {
+  function guessBoNameFromUrl() {
     try {
-      document.documentElement.setAttribute('data-state-scope-allowlist', JSON.stringify(config));
-    } catch (error) {
-      console.warn('[StateScope] allowlist DOM deliver failed', error);
+      const href = `${location.hash || ''}${location.search || ''}`;
+      const pageParamsMatch = (location.search || href).match(/pageParams=([^&]+)/);
+      if (pageParamsMatch?.[1]) {
+        try {
+          const params = JSON.parse(decodeURIComponent(pageParamsMatch[1]));
+          const groupId = params?.routeParams?.groupId || params?.menuInfo?.routeParams?.groupId;
+          if (groupId) {
+            return String(groupId);
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (/outsourceIssue/i.test(href)) {
+        return 'OutsourceIssue';
+      }
+      if (/goodsIssue/i.test(href)) {
+        return 'GoodsIssue';
+      }
+      if (/mpManufactureOrder/i.test(href)) {
+        return 'MpManufactureOrder';
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  }
+
+  function deliverAllowlistToPage(config) {
+    if (!config?.boName || deliveredBoNames.has(config.boName)) {
+      return;
+    }
+    deliveredBoNames.add(config.boName);
+
+    // 仅把「当前路由匹配」的 allowlist 写入 DOM（injector 启动时读一次）
+    const routeBo = guessBoNameFromUrl();
+    if (!routeBo || routeBo === config.boName) {
+      try {
+        document.documentElement.setAttribute('data-state-scope-allowlist', JSON.stringify(config));
+      } catch {
+        // ignore
+      }
     }
 
-    const script = document.createElement('script');
-    script.textContent = `(function () {
-      var config = ${JSON.stringify(config)};
-      if (localStorage.getItem('stateScopeAutoAllowlist') === 'false') {
-        return;
-      }
-      if (window.__StateScope__ && typeof window.__StateScope__.applyAllowlistConfig === 'function') {
-        window.__StateScope__.applyAllowlistConfig(config);
-        return;
-      }
-      window.__StateScopePendingAllowlists__ = window.__StateScopePendingAllowlists__ || [];
-      var exists = window.__StateScopePendingAllowlists__.some(function (item) {
-        return item && item.boName === config.boName && item.version === config.version;
-      });
-      if (!exists) {
-        window.__StateScopePendingAllowlists__.push(config);
-      }
-    })();`;
-    (document.documentElement || document.head).appendChild(script);
-    script.remove();
-
     window.postMessage({ channel: 'StateScopeAllowlist', config }, '*');
+  }
+
+  function orderedCandidates() {
+    const bo = guessBoNameFromUrl();
+    if (bo) {
+      return [`${bo}.v1.json`, ...ALL_FILES.filter((f) => f !== `${bo}.v1.json`)];
+    }
+    return ALL_FILES;
   }
 
   async function loadAllowlistFiles() {
@@ -94,29 +163,28 @@
     }
     loading = true;
     try {
-      for (const fileName of candidates) {
+      if (!chrome.runtime?.id) {
+        return false;
+      }
+      let any = false;
+      for (const fileName of orderedCandidates()) {
         try {
           const url = chrome.runtime.getURL(`allowlists/${fileName}`);
           const response = await fetch(url);
           if (!response.ok) {
-            console.warn(`[StateScope] allowlist fetch failed: ${fileName} (${response.status})`);
             continue;
           }
           const config = await response.json();
           if (!config?.boName || !config?.fields?.length) {
-            console.warn(`[StateScope] allowlist invalid: ${fileName}`);
             continue;
           }
           deliverAllowlistToPage(config);
-          console.info(
-            `[StateScope] allowlist delivered: ${config.boName} v${config.version || '?'} (${config.fields.length} fields)`
-          );
-          return true;
-        } catch (error) {
-          console.warn(`[StateScope] allowlist load error: ${fileName}`, error);
+          any = true;
+        } catch {
+          // try next
         }
       }
-      return false;
+      return any;
     } finally {
       loading = false;
     }
@@ -135,9 +203,6 @@
   });
 
   loadAllowlistFiles();
-  setTimeout(() => loadAllowlistFiles(), 800);
-  setTimeout(() => loadAllowlistFiles(), 2500);
-  setTimeout(() => loadAllowlistFiles(), 6000);
 })();
 
 (function injectStateScope() {
@@ -145,6 +210,22 @@
     return;
   }
   window.__stateScopeBridgeInjected__ = true;
+
+  function shouldInjectMainWorld() {
+    try {
+      return localStorage.getItem('bizDebug') === 'true' || window.bizDebug === true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (!shouldInjectMainWorld()) {
+    return;
+  }
+
+  if (!chrome.runtime?.id) {
+    return;
+  }
 
   const script = document.createElement('script');
   script.src = chrome.runtime.getURL('dist/injector.js');

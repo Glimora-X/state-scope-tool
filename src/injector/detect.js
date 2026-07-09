@@ -1,8 +1,9 @@
 /**
- * 运行时识别：boName 来自 bizApplication / presenter，profile 优先 traditional。
+ * 运行时识别：boName 来自 bizApplication / presenter / viewModel，profile 见 profile-registry。
  */
 
-import { isLowcodeViewModel } from './discover.js';
+import { resolveBoNameFromRoute, resolveBoNameFromViewModel } from './discover.js';
+import { resolveEffectiveProfile, resolveProfileDetection } from './profile-registry.js';
 
 export function getBoName(bizApplication) {
   if (!bizApplication) {
@@ -26,41 +27,42 @@ export function getAction(bizApplication, presenter) {
 }
 
 export function getRouteHint() {
-  return `${window.location.pathname}${window.location.search}`;
+  return `${window.location.pathname}${window.location.hash || ''}${window.location.search || ''}`;
+}
+
+function resolveMetaBoName(context = {}) {
+  return (
+    context.boName ||
+    getBoName(context.bizApplication) ||
+    context.presenter?.voucherBoName ||
+    context.presenter?.boName ||
+    context.formController?.presenter?.voucherBoName ||
+    resolveBoNameFromViewModel(context.viewModel) ||
+    resolveBoNameFromRoute() ||
+    ''
+  );
 }
 
 export function detectProfile(context = {}) {
-  const forced = localStorage.getItem('stateScopeProfile');
-  if (forced === 'traditional' || forced === 'lowcode') {
-    return forced;
-  }
+  const boName = resolveMetaBoName(context);
+  return resolveEffectiveProfile(context, boName).effectiveProfile;
+}
 
-  const { uiStateController, formController, presenter, viewModel } = context;
-
-  if (uiStateController || formController || presenter) {
-    return 'traditional';
-  }
-
-  if (isLowcodeViewModel(viewModel)) {
-    return 'lowcode';
-  }
-
-  return 'unknown';
+export function getProfileDetection(context = {}) {
+  const boName = resolveMetaBoName(context);
+  return resolveEffectiveProfile(context, boName);
 }
 
 export function getRuntimeMeta(context = {}) {
   const bizApplication = context.bizApplication || window.bizApplication;
-  const presenter = context.presenter;
+  const boName = resolveMetaBoName({ ...context, bizApplication });
+  const profileDetection = getProfileDetection({ ...context, bizApplication, boName });
+
   return {
-    boName:
-      context.boName ||
-      getBoName(bizApplication) ||
-      presenter?.voucherBoName ||
-      presenter?.boName ||
-      context.formController?.presenter?.voucherBoName ||
-      '',
+    boName,
     action: getAction(bizApplication, context.presenter),
     route: getRouteHint(),
-    profile: detectProfile(context)
+    profile: profileDetection.effectiveProfile,
+    profileDetection
   };
 }

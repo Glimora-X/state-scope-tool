@@ -1,8 +1,8 @@
-import { buildAllowlistPathSet } from './allowlist-config.js';
-import { diffSnapshots, SEVERITY } from './diff.js';
-import { isVerboseMode } from './path-filter.js';
+import { SEVERITY } from './diff.js';
+import { isConsoleOutputEnabled, isVerboseMode } from './path-filter.js';
 import { formatGroupTitle, formatScopeLine, formatDetailPathHint } from './legacy-diagnostics.js';
 import { isDebugMode, storeEpoch } from './debug-store.js';
+import { mergeLowcodeBufferIntoEpoch } from './lowcode-buffer.js';
 import { scopeLog, scopeLogBlock } from './safe-log.js';
 import { buildPanelEpochPayload } from './panel-payload.js';
 import { publishEpochToPanel } from './panel-post.js';
@@ -32,7 +32,8 @@ export function createEpochManager(onFinalize) {
       changedSample: {},
       finalSnap: {},
       oldSnap: {},
-      newSnap: {}
+      newSnap: {},
+      shadowSnap: {}
     };
     return currentEpoch.id;
   }
@@ -69,16 +70,28 @@ export function createEpochManager(onFinalize) {
     Object.assign(currentEpoch.newSnap, entries);
   }
 
+  function recordShadow(entries) {
+    if (!currentEpoch || !entries) {
+      return;
+    }
+    Object.assign(currentEpoch.shadowSnap, entries);
+  }
+
   function commitEpoch() {
     if (!currentEpoch) {
       return;
     }
 
+    mergeLowcodeBufferIntoEpoch(currentEpoch);
+
     const epoch = currentEpoch;
     currentEpoch = null;
 
-    const hasOld = Object.keys(epoch.oldSnap).length > 0 || Object.keys(epoch.finalSnap).length > 0;
-    const hasNew = Object.keys(epoch.newSnap).length > 0;
+    const hasOld =
+      Object.keys(epoch.oldSnap).length > 0 ||
+      Object.keys(epoch.finalSnap).length > 0;
+    const hasNew =
+      Object.keys(epoch.newSnap).length > 0 || Object.keys(epoch.shadowSnap || {}).length > 0;
     if (!hasOld && !hasNew) {
       return;
     }
@@ -93,6 +106,7 @@ export function createEpochManager(onFinalize) {
     recordFinal,
     recordOld,
     recordNew,
+    recordShadow,
     commitEpoch,
     finalizeEpoch: commitEpoch
   };
@@ -105,7 +119,7 @@ function buildResultLines(snap, maxLines) {
 
   for (let i = 0; i < limit; i += 1) {
     const key = keys[i];
-      lines.push(`${key} = ${formatValLong(snap[key])}`);
+      lines.push(`${key} = ${formatValLong(snap[key], key)}`);
   }
   if (keys.length > limit) {
     lines.push(`… +${keys.length - limit} more (stateScopeVerbose=true)`);
@@ -124,14 +138,19 @@ function printSnapSection(label, snap) {
 }
 
 export function reportEpochToConsole(epoch, meta, allowlistConfig) {
+  const payload = buildPanelEpochPayload(epoch, meta, allowlistConfig);
   storeEpoch(epoch, meta);
-  publishEpochToPanel(buildPanelEpochPayload(epoch, meta, allowlistConfig));
+  publishEpochToPanel(payload);
 
-  const allowlist = allowlistConfig ? buildAllowlistPathSet(allowlistConfig) : undefined;
-  const diffs = diffSnapshots(epoch.oldSnap, epoch.newSnap, allowlist);
+  if (!isConsoleOutputEnabled()) {
+    return;
+  }
+
+  const profile = meta?.profile || 'traditional';
+  const diffs = payload.diffs || [];
   const mismatches = diffs.filter((item) => item.severity !== SEVERITY.OK);
   const logicMismatches = mismatches.filter((item) => item.severity === SEVERITY.LOGIC_MISMATCH);
-  const hasNewChain = Object.keys(epoch.newSnap).length > 0;
+  const hasNewChain = payload.hasNewChain;
   const scopeLine = formatScopeLine(epoch.scope);
   const groupTitle = formatGroupTitle(epoch.scope, epoch.changedSample, epoch.finalSnap);
 

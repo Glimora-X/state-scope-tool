@@ -14,6 +14,7 @@ import {
   groupChangedByBusiness
 } from './panel-view-model.js';
 import { getScenarioTag } from './scenario-context.js';
+import { getRuntimeMeta } from './detect.js';
 import {
   buildChangedSetFinalSnap,
   buildDetailGrids,
@@ -27,7 +28,7 @@ import {
   summarizeDiffs
 } from './snap-view.js';
 
-function enrichDiffRow(row, hasNewChain) {
+function enrichDiffRow(row, hasNewChain, profile) {
   const parsed = row.path.split('.');
   let displayName = parsed[parsed.length - 2] || row.path;
   let gridHint = null;
@@ -37,6 +38,7 @@ function enrichDiffRow(row, hasNewChain) {
   }
 
   if (!hasNewChain) {
+    const pendingLabel = profile === 'lowcode' ? 'shadow 未接入' : '待接入';
     return {
       ...row,
       displayName,
@@ -45,7 +47,7 @@ function enrichDiffRow(row, hasNewChain) {
       newLabel: '—',
       new: undefined,
       severity: 'pending',
-      resultLabel: '待接入'
+      resultLabel: pendingLabel
     };
   }
 
@@ -59,8 +61,47 @@ function enrichDiffRow(row, hasNewChain) {
   };
 }
 
+function resolveOldSnapForDiff(epoch, profile) {
+  const oldSnap = epoch.oldSnap || {};
+  const finalSnap = epoch.finalSnap || {};
+
+  if (profile === 'lowcode') {
+    if (Object.keys(finalSnap).length > 0) {
+      return finalSnap;
+    }
+    return oldSnap;
+  }
+
+  if (epoch.phase === 'init-full' && Object.keys(finalSnap).length > 0) {
+    return finalSnap;
+  }
+  if ((epoch.scope?.mainRecalcCount || 0) > 0 && Object.keys(finalSnap).length > Object.keys(oldSnap).length) {
+    return finalSnap;
+  }
+  return oldSnap;
+}
+
+function resolveNewSnapForDiff(epoch, profile) {
+  const newSnap = epoch.newSnap || {};
+  const shadowSnap = epoch.shadowSnap || {};
+  if (profile === 'lowcode') {
+    return { ...newSnap, ...shadowSnap };
+  }
+  return newSnap;
+}
+
+function resolveHasNewChain(epoch, profile) {
+  const newSnap = epoch.newSnap || {};
+  const shadowSnap = epoch.shadowSnap || {};
+  if (profile === 'lowcode') {
+    return Object.keys(shadowSnap).length > 0 || Object.keys(newSnap).length > 0;
+  }
+  return Object.keys(newSnap).length > 0;
+}
+
 export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
-  const hasNewChain = Object.keys(epoch.newSnap || {}).length > 0;
+  const profile = meta?.profile || 'unknown';
+  const hasNewChain = resolveHasNewChain(epoch, profile);
   const allowlist = allowlistConfig ? buildAllowlistPathSet(allowlistConfig) : undefined;
   const scopeLine = formatScopeLine(epoch.scope);
   const groupTitle = formatGroupTitle(epoch.scope, epoch.changedSample, epoch.finalSnap);
@@ -70,8 +111,10 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
   const mainSnap = pickMainKeys(epoch.finalSnap);
   const detailSnap = pickDetailKeys(epoch.finalSnap, epoch.changedSample);
 
-  const rawDiffs = diffSnapshots(epoch.oldSnap, epoch.newSnap, allowlist);
-  const diffs = rawDiffs.map((row) => enrichDiffRow(row, hasNewChain));
+  const oldSnapForDiff = resolveOldSnapForDiff(epoch, profile);
+  const newSnapForDiff = resolveNewSnapForDiff(epoch, profile);
+  const rawDiffs = diffSnapshots(oldSnapForDiff, newSnapForDiff, allowlist);
+  const diffs = rawDiffs.map((row) => enrichDiffRow(row, hasNewChain, profile));
   const diffSummary = summarizeDiffs(diffs);
   const diffGroups = groupDiffRows(diffs);
   const changedRows = snapToRows(changedSetSnap, { changedSample: epoch.changedSample, highlightChanged: true });
@@ -147,15 +190,7 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
 }
 
 export function buildRuntimePayload(runtimeContext) {
-  const meta = {
-    boName:
-      runtimeContext.boName ||
-      runtimeContext.bizApplication?.boName ||
-      runtimeContext.presenter?.voucherBoName ||
-      '',
-    profile: runtimeContext.profile || 'unknown',
-    route: typeof location !== 'undefined' ? location.pathname : ''
-  };
+  const meta = getRuntimeMeta(runtimeContext);
 
   return {
     meta,
@@ -167,7 +202,9 @@ export function buildRuntimePayload(runtimeContext) {
       uiStateController: !!runtimeContext.uiStateController,
       formController: !!runtimeContext.formController,
       lowcodeViewModel: !!runtimeContext.viewModel,
-      boName: meta.boName
+      boName: meta.boName,
+      profile: meta.profile,
+      profileDetection: meta.profileDetection || null
     },
     updatedAt: Date.now()
   };

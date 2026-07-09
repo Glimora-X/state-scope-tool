@@ -1,5 +1,7 @@
 const STATE_TYPES = ['visible', 'disabled'];
 
+import { filterTopLevelEntries } from './path-filter.js';
+
 export function normalizeOldFieldState(result) {
   const normalized = {};
   if (!result || typeof result !== 'object') {
@@ -51,6 +53,40 @@ export function flattenStatePatches(patches, prefix = '') {
   }
 
   return flat;
+}
+
+/**
+ * biz-core statePatches 表头路径无 main. 前缀（exchangeRate.disabled），
+ * 与 old 轨 main.exchangeRate.disabled 对齐后再做 top-level 过滤。
+ */
+export function normalizeNewSnapKey(key) {
+  const parts = String(key).split('.');
+  const stateType = parts[parts.length - 1];
+  if (stateType !== 'visible' && stateType !== 'disabled') {
+    return key;
+  }
+  if (parts[0] === 'main' && parts.length === 3) {
+    return key;
+  }
+  if (parts[0] !== 'main' && parts.length === 4) {
+    return key;
+  }
+  if (parts.length === 2) {
+    return `main.${key}`;
+  }
+  return key;
+}
+
+export function normalizeNewSnapPaths(flat) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(flat || {})) {
+    normalized[normalizeNewSnapKey(key)] = value;
+  }
+  return normalized;
+}
+
+export function captureStatePatchesAsSnap(statePatches) {
+  return filterTopLevelEntries(normalizeNewSnapPaths(flattenStatePatches(statePatches)));
 }
 
 export function mergeSnapshot(target, source) {

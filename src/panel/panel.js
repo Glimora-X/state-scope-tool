@@ -1,6 +1,8 @@
 const ui = {
   tab: 'overview',
   selectedEpochId: null,
+  /** true = 跟随最新 Epoch；用户点选历史条目后变为 false */
+  epochFollowLatest: true,
   expanded: {
     changedSet: false,
     main: false,
@@ -14,11 +16,14 @@ const ui = {
   pageSettings: null,
   settingsMessage: '',
   lastSyncedBoName: null,
+  lastSyncedScenarioCatalogKey: null,
+  allowlistBinding: null,
+  scenarioCatalog: null,
   scenarioTag: '',
   issueStatusFilter: '',
   issueSyncFilter: '',
   selectedIssueFps: null,
-  selectedScenarioTag: 'edit'
+  selectedScenarioTag: ''
 };
 
 const DEBUG_KEYS = [
@@ -27,9 +32,255 @@ const DEBUG_KEYS = [
   { key: 'stateScopeDebug', label: 'stateScopeDebug', desc: '写入 __StateScope__.getLastEpoch()' }
 ];
 
+const PROFILE_OPTIONS = [
+  { value: 'auto', label: 'auto（自动识别）', desc: '优先运行时信号，hybrid 时用 boName 默认映射' },
+  { value: 'traditional', label: 'traditional（系统单据）', desc: 'StateCollector + FormController.refreshView' },
+  { value: 'lowcode', label: 'lowcode（MDF 低代码）', desc: 'getDisable 终值 vs shadowStore / statePatches' }
+];
+
 let tabId = null;
 let appState = null;
 let dataSource = 'background';
+let lastRefreshFingerprint = '';
+let refreshInFlight = false;
+let pendingRefresh = false;
+let lastPageSyncEpochCount = 0;
+let lastSyncedLatestEpochId = null;
+let refreshTimerId = null;
+let runtimeMessageFailures = 0;
+const MAX_RUNTIME_MESSAGE_FAILURES = 3;
+const PANEL_REFRESH_MS = 4000;
+
+async function safeRuntimeMessage(message) {
+  if (runtimeMessageFailures >= MAX_RUNTIME_MESSAGE_FAILURES) {
+    return null;
+  }
+  try {
+    if (!chrome.runtime?.id) {
+      runtimeMessageFailures = MAX_RUNTIME_MESSAGE_FAILURES;
+      return null;
+    }
+    const response = await chrome.runtime.sendMessage(message);
+    runtimeMessageFailures = 0;
+    return response;
+  } catch {
+    runtimeMessageFailures += 1;
+    return null;
+  }
+}
+
+const GOODS_ISSUE_L3_VERSION = '2026-06-29-l3-v1';
+
+function seedScenarioFieldRows(record) {
+  if (!record?.watchFields?.length) {
+    return record;
+  }
+  const map = new Map((record.fields || []).map((item) => [item.fieldId, item]));
+  for (const watch of record.watchFields) {
+    if (!watch?.path) {
+      continue;
+    }
+    const stateType = watch.stateType || 'disabled';
+    const fieldId = `${watch.path}::${stateType}`;
+    if (map.has(fieldId)) {
+      continue;
+    }
+    map.set(fieldId, {
+      fieldId,
+      path: watch.path,
+      stateType,
+      configKey: '',
+      epochCount: 0,
+      logicMismatchCount: 0,
+      lastSeverity: 'unobserved',
+      lastEpochId: null,
+      scenarioReady: false,
+      blockReason: '尚未观测'
+    });
+  }
+  record.fields = [...map.values()].sort((a, b) => a.path.localeCompare(b.path));
+  record.allowlistFieldCount = record.signOffMode === 'manual' ? 0 : record.watchFields.length;
+  record.unobservedFields = Math.max(0, record.allowlistFieldCount - (record.readyFields || 0));
+  return record;
+}
+
+function isLegacyScenarioReport(report) {
+  if (!report?.scenarios) {
+    return true;
+  }
+  const tags = Object.keys(report.scenarios);
+  if (!tags.length) {
+    return true;
+  }
+  if (report.catalogVersion === GOODS_ISSUE_L3_VERSION && tags.length >= 15) {
+    return false;
+  }
+  // 用户上传的领域 SSOT（归一化后 tag 来自 OI-S01 等）或工具 L3
+  if (tags.some((tag) => tag.startsWith('gi-') || tag.startsWith('oi-') || /^oi-s\d+/i.test(tag) || /^s\d+$/i.test(tag))) {
+    return false;
+  }
+  if (report.catalogVersion && tags.length >= 1 && !['new', 'edit', 'view'].includes(tags[0])) {
+    return false;
+  }
+  return tags.length <= 10 && tags.includes('new');
+}
+
+function buildScenarioRecordFromMeta(meta, existing) {
+  if (existing) {
+    const merged = {
+      ...existing,
+      tag: meta.tag,
+      order: meta.order ?? existing.order ?? 0,
+      label: meta.label || existing.label || meta.tag,
+      group: meta.group || existing.group || '',
+      checkpoint: meta.checkpoint || existing.checkpoint || '',
+      signOffMode: meta.signOffMode === 'manual' ? 'manual' : existing.signOffMode || 'allowlist',
+      watchFields: meta.watchFields?.length ? meta.watchFields : existing.watchFields || [],
+      steps: meta.steps?.length ? meta.steps : existing.steps || []
+    };
+    return seedScenarioFieldRows(merged);
+  }
+  const signOffMode = meta.signOffMode === 'manual' ? 'manual' : 'allowlist';
+  const watchFields = Array.isArray(meta.watchFields) ? meta.watchFields : [];
+  return seedScenarioFieldRows({
+    tag: meta.tag,
+    order: meta.order ?? 0,
+    label: meta.label || meta.tag,
+    group: meta.group || '',
+    checkpoint: meta.checkpoint || '',
+    signOffMode,
+    watchFields,
+    steps: Array.isArray(meta.steps) ? meta.steps : [],
+    status: 'not_started',
+    markedComplete: false,
+    markedCompleteAt: null,
+    epochCount: 0,
+    logicMismatchCount: 0,
+    allowlistFieldCount: signOffMode === 'manual' ? 0 : watchFields.length,
+    readyFields: 0,
+    blockedFields: 0,
+    unobservedFields: signOffMode === 'manual' ? 0 : watchFields.length,
+    fields: []
+  });
+}
+
+function mergeScenarioCatalogIntoReport(catalog, report) {
+  if (!catalog?.scenarios?.length) {
+    return report || null;
+  }
+  const scenarios = {};
+  const sorted = [...catalog.scenarios].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  for (const meta of sorted) {
+    scenarios[meta.tag] = buildScenarioRecordFromMeta(meta, report?.scenarios?.[meta.tag]);
+  }
+  const list = Object.values(scenarios);
+  const summary =
+    report?.summary && report.summary.total === list.length ?
+      report.summary
+    : {
+        total: list.length,
+        pass: list.filter((item) => item.status === 'pass').length,
+        block: list.filter((item) => item.status === 'block').length,
+        inProgress: list.filter((item) => item.status === 'in_progress').length,
+        notStarted: list.filter((item) => item.status === 'not_started').length,
+        markedComplete: list.filter((item) => item.markedComplete).length
+      };
+  return {
+    boName: catalog.boName || report?.boName || null,
+    catalogVersion: catalog.version || report?.catalogVersion || null,
+    catalogTitle: catalog.title || report?.catalogTitle || null,
+    allowlistVersion: catalog.allowlistVersion || report?.allowlistVersion || null,
+    hasNewChainObserved: report?.hasNewChainObserved || false,
+    updatedAt: report?.updatedAt || Date.now(),
+    summary,
+    scenarios
+  };
+}
+
+function hydrateScenarioReportFromCatalog() {
+  if (!ui.scenarioCatalog?.scenarios?.length) {
+    return;
+  }
+  if (!appState) {
+    appState = { runtime: null, epochs: [], selectedEpochId: null, issues: [], settings: {} };
+  }
+  if (isLegacyScenarioReport(appState.scenarioReport) || !appState.scenarioReport) {
+    appState.scenarioReport = mergeScenarioCatalogIntoReport(ui.scenarioCatalog, appState.scenarioReport);
+  }
+}
+
+function getScenarioReportForUi() {
+  hydrateScenarioReportFromCatalog();
+  return appState?.scenarioReport || null;
+}
+
+function isL3ScenarioReady(report) {
+  if (!report?.scenarios) {
+    return false;
+  }
+  const tags = Object.keys(report.scenarios);
+  const count = tags.length;
+  if (!count || !report.catalogVersion) {
+    return false;
+  }
+  if (report.catalogVersion === GOODS_ISSUE_L3_VERSION && count >= 15) {
+    return true;
+  }
+  // 领域 SSOT 上传后：有 boName + version + ≥1 场景即就绪（不再依赖工具仓副本）
+  if (report.boName && report.boName !== 'GoodsIssue' && count >= 1) {
+    return true;
+  }
+  return count >= 5 && tags.some((tag) => tag.startsWith('gi-'));
+}
+
+async function ensureLocalScenarioCatalog() {
+  const boName = await resolveBoNameForAllowlist();
+  if (
+    ui.scenarioCatalog?.boName &&
+    boName &&
+    ui.scenarioCatalog.boName === boName &&
+    ui.scenarioCatalog?.scenarios?.length
+  ) {
+    return ui.scenarioCatalog;
+  }
+
+  // 仅 GoodsIssue 可从扩展内补；其它 BO 必须上传领域 SSOT
+  if (boName !== 'GoodsIssue') {
+    return ui.scenarioCatalog || null;
+  }
+
+  try {
+    const url = chrome.runtime.getURL('scenarios/GoodsIssue.L3.v1.json');
+    const response = await fetch(url);
+    if (!response.ok) {
+      return ui.scenarioCatalog || null;
+    }
+    const catalog = await response.json();
+    ui.scenarioCatalog = catalog;
+    hydrateScenarioReportFromCatalog();
+    return ui.scenarioCatalog;
+  } catch {
+    return ui.scenarioCatalog || null;
+  }
+}
+
+function rememberScenarioCatalog(catalog) {
+  if (!catalog?.scenarios?.length) {
+    return null;
+  }
+  ui.scenarioCatalog = catalog;
+  if (!appState) {
+    appState = { runtime: null, epochs: [], selectedEpochId: null, issues: [], settings: {} };
+  }
+  appState.scenarioReport = mergeScenarioCatalogIntoReport(catalog, appState.scenarioReport);
+  ui.lastSyncedScenarioCatalogKey = `${catalog.boName || ''}:${catalog.version || ''}`;
+  const firstTag = [...catalog.scenarios].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0]?.tag;
+  if (firstTag && (!ui.selectedScenarioTag || !catalog.scenarios.some((s) => s.tag === ui.selectedScenarioTag))) {
+    ui.selectedScenarioTag = firstTag;
+  }
+  lastRefreshFingerprint = '';
+  return appState.scenarioReport;
+}
 
 function slimEpochForBackground(epoch) {
   if (!epoch || epoch.id == null) {
@@ -81,7 +332,12 @@ function applyPageSyncToAppState() {
   }
 
   const bgEpochCount = appState.epochs?.length || 0;
-  if (pageEpochs.length >= bgEpochCount) {
+  const pageLatestId = page.pageSyncSummary?.latestEpochId ?? pageEpochs[0]?.id ?? null;
+  const bgLatestId = appState.epochs?.[0]?.id ?? null;
+  const pageHasNewerEpoch =
+    pageLatestId != null && pageLatestId !== bgLatestId && pageEpochs.some((item) => item.id === pageLatestId);
+
+  if (pageEpochs.length >= bgEpochCount || pageHasNewerEpoch) {
     appState.epochs = pageEpochs;
     dataSource = 'page';
     if (page.pageSync?.runtime) {
@@ -93,14 +349,57 @@ function applyPageSyncToAppState() {
         diagnostics: appState.runtime?.diagnostics || {}
       };
     }
-    if (!ui.selectedEpochId) {
-      ui.selectedEpochId = appState.selectedEpochId || pageEpochs[0]?.id || null;
-    }
+    maybeSelectLatestEpoch();
     return true;
   }
 
   dataSource = bgEpochCount > 0 ? 'background' : dataSource;
   return false;
+}
+
+function normalizeEpochId(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : value;
+}
+
+function epochIdsEqual(a, b) {
+  return a == b;
+}
+
+function getLatestEpochId() {
+  return (
+    ui.pageSettings?.pageSyncSummary?.latestEpochId ??
+    ui.pageSettings?.pageSync?.epochs?.[0]?.id ??
+    appState?.epochs?.[0]?.id ??
+    null
+  );
+}
+
+function maybeSelectLatestEpoch() {
+  const latestId = getLatestEpochId();
+  if (latestId == null) {
+    return;
+  }
+
+  const latestChanged = !epochIdsEqual(latestId, lastSyncedLatestEpochId);
+
+  if (!ui.epochFollowLatest && ui.selectedEpochId != null) {
+    if (latestChanged) {
+      lastSyncedLatestEpochId = latestId;
+    }
+    return;
+  }
+
+  if (latestChanged) {
+    ui.selectedEpochId = normalizeEpochId(latestId);
+    if (appState) {
+      appState.selectedEpochId = ui.selectedEpochId;
+    }
+  } else if (!ui.selectedEpochId) {
+    ui.selectedEpochId = normalizeEpochId(appState?.selectedEpochId || latestId);
+  }
+
+  lastSyncedLatestEpochId = latestId;
 }
 
 function esc(text) {
@@ -115,24 +414,31 @@ function getSelectedEpoch() {
   if (!appState?.epochs?.length) {
     return null;
   }
-  const id = ui.selectedEpochId ?? appState.selectedEpochId ?? appState.epochs[0].id;
-  return appState.epochs.find((item) => item.id === id) || appState.epochs[0];
+  const id = normalizeEpochId(
+    ui.selectedEpochId ?? appState.selectedEpochId ?? appState.epochs[0].id
+  );
+  return appState.epochs.find((item) => epochIdsEqual(item.id, id)) || appState.epochs[0];
 }
 
 async function loadState() {
   if (tabId == null) {
+    hydrateScenarioReportFromCatalog();
     return;
   }
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'SS_GET_STATE', tabId });
-    appState = response?.state || {
-      runtime: null,
-      epochs: [],
-      selectedEpochId: null,
-      issues: [],
-      settings: {}
-    };
-    appState._bgEpochCount = appState.epochs?.length || 0;
+    const response = await safeRuntimeMessage({ type: 'SS_GET_STATE', tabId });
+    if (response?.state) {
+      appState = response.state;
+      appState._bgEpochCount = appState.epochs?.length || 0;
+    } else if (!appState) {
+      appState = {
+        runtime: null,
+        epochs: [],
+        selectedEpochId: null,
+        issues: [],
+        settings: {}
+      };
+    }
   } catch {
     appState = appState || {
       runtime: null,
@@ -142,6 +448,7 @@ async function loadState() {
       settings: {}
     };
   }
+  hydrateScenarioReportFromCatalog();
   if (!ui.selectedEpochId && appState.selectedEpochId) {
     ui.selectedEpochId = appState.selectedEpochId;
   }
@@ -153,7 +460,7 @@ async function syncFromPageIfNeeded() {
   }
 
   const page = ui.pageSettings || {};
-  const pageEpochCount = page.pageSync?.epochs?.length || 0;
+  const pageEpochCount = getPageEpochCount();
   const bgEpochCount = appState?.epochs?.length || 0;
   const bgHasRuntime = !!appState?.runtime?.meta?.boName;
 
@@ -167,12 +474,22 @@ async function syncFromPageIfNeeded() {
     return false;
   }
 
+  if (!page.pageSync?.epochs?.length && pageEpochCount > 0) {
+    await readPageSyncFull();
+  }
+
+  const syncPage = ui.pageSettings || {};
+  const epochs = syncPage.pageSync?.epochs || [];
+  if (!epochs.length) {
+    return false;
+  }
+
   try {
-    const response = await chrome.runtime.sendMessage({
+    const response = await safeRuntimeMessage({
       type: 'SS_BULK_SYNC',
       tabId,
-      runtime: page.pageSync?.runtime || null,
-      epochs: (page.pageSync?.epochs || []).map(slimEpochForBackground).filter(Boolean)
+      runtime: syncPage.pageSync?.runtime || syncPage.pageSyncSummary?.runtime || null,
+      epochs: epochs.map(slimEpochForBackground).filter(Boolean)
     });
     if (response?.ok) {
       ui.panelSyncMessage =
@@ -199,9 +516,8 @@ async function resyncPanelFromPage() {
 
   await evalInPage('window.__StateScope__?.syncPanelState?.()');
   await new Promise((resolve) => setTimeout(resolve, 300));
-  await readPageSettings();
+  await readPageSyncFull();
   await loadState();
-  applyPageSyncToAppState();
   await syncFromPageIfNeeded();
   await loadState();
   applyPageSyncToAppState();
@@ -217,39 +533,82 @@ function evalInPage(expression) {
       resolve({ ok: false, error: '无法访问 inspectedWindow' });
       return;
     }
-    chrome.devtools.inspectedWindow.eval(expression, (result, exceptionInfo) => {
-      if (exceptionInfo) {
-        resolve({
-          ok: false,
-          error: exceptionInfo.value || exceptionInfo.description || 'eval failed'
-        });
-        return;
-      }
-      resolve({ ok: true, result });
-    });
+    try {
+      chrome.devtools.inspectedWindow.eval(expression, (result, exceptionInfo) => {
+        if (exceptionInfo) {
+          resolve({
+            ok: false,
+            error: exceptionInfo.value || exceptionInfo.description || 'eval failed'
+          });
+          return;
+        }
+        resolve({ ok: true, result });
+      });
+    } catch (error) {
+      resolve({ ok: false, error: error?.message || 'eval unavailable' });
+    }
   });
 }
 
-async function readPageSettings() {
+async function readPageSettings(options = {}) {
+  const includeAllowlistFields = options.includeAllowlistFields === true;
+  const allowlistFieldsExpr = includeAllowlistFields ?
+      `(window.__StateScope__?.getAllowlistConfig?.()?.fields || []).map(function (f) {
+        return { path: f.path, stateType: f.stateType, configKey: f.configKey, oldEntry: f.oldEntry };
+      })`
+    : '[]';
+
   const response = await evalInPage(`({
     bizDebug: localStorage.getItem('bizDebug') === 'true',
     stateScopeVerbose: localStorage.getItem('stateScopeVerbose') === 'true',
     stateScopeDebug: localStorage.getItem('stateScopeDebug') === 'true',
     stateScopeAutoAllowlist: localStorage.getItem('stateScopeAutoAllowlist') !== 'false',
+    stateScopeProfile: window.__StateScope__?.getProfileMode?.() || localStorage.getItem('stateScopeProfile') || 'auto',
+    profileDetection: window.__StateScope__?.getProfileDetection?.() || null,
     stateScopeInstalled: !!(window.__StateScope__ && window.__StateScope__.installed),
     allowlistActive: !!(window.__StateScope__?.getAllowlistConfig?.()),
     allowlistFieldCount: window.__StateScope__?.getAllowlistConfig?.()?.fields?.length || 0,
     allowlistVersion: window.__StateScope__?.getAllowlistConfig?.()?.version || '',
+    allowlistBoName: window.__StateScope__?.getAllowlistConfig?.()?.boName || '',
+    allowlistNote: window.__StateScope__?.getAllowlistConfig?.()?.note || '',
+    allowlistFields: ${allowlistFieldsExpr},
     loadedAllowlistKeys: window.__StateScope__?.listLoadedAllowlists?.() || [],
     pageMeta: window.__StateScope__?.getMeta?.() || null,
-    pageSync: window.__StateScope__?.getPanelSyncPayload?.() || null,
+    pageSyncSummary: window.__StateScope__?.getPanelSyncSummary?.() || null,
     relayBroken: window.__StateScope__?.extensionRelayBroken === true,
     relayError: window.__StateScope__?.extensionRelayError || ''
   })`);
   if (response.ok) {
     ui.pageSettings = response.result;
+    ui.pageSettings.pageSyncEpochCount = ui.pageSettings.pageSyncSummary?.epochCount || 0;
   }
   return response;
+}
+
+async function readPageSyncFull() {
+  const response = await evalInPage(`window.__StateScope__?.getPanelSyncPayload?.() || null`);
+  if (response.ok && response.result) {
+    ui.pageSettings = {
+      ...(ui.pageSettings || {}),
+      pageSync: response.result,
+      pageSyncEpochCount: response.result.epochs?.length || 0,
+      pageSyncSummary: {
+        ...(ui.pageSettings?.pageSyncSummary || {}),
+        epochCount: response.result.epochs?.length || 0,
+        latestEpochId: response.result.epochs?.[0]?.id ?? null,
+        latestStartedAt: response.result.epochs?.[0]?.startedAt ?? null
+      }
+    };
+    lastPageSyncEpochCount = ui.pageSettings.pageSyncEpochCount;
+    lastSyncedLatestEpochId = ui.pageSettings.pageSyncSummary?.latestEpochId ?? null;
+    applyPageSyncToAppState();
+    return response.result;
+  }
+  return null;
+}
+
+function getPageEpochCount() {
+  return ui.pageSettings?.pageSync?.epochs?.length ?? ui.pageSettings?.pageSyncEpochCount ?? 0;
 }
 
 function getActivationState() {
@@ -294,21 +653,40 @@ function getActivationState() {
 
 async function enableAllDebugSettings() {
   const response = await evalInPage(`(function () {
-    localStorage.setItem('bizDebug', 'true');
-    localStorage.setItem('stateScopeVerbose', 'true');
-    localStorage.setItem('stateScopeDebug', 'true');
-    return {
-      bizDebug: localStorage.getItem('bizDebug') === 'true',
-      stateScopeVerbose: localStorage.getItem('stateScopeVerbose') === 'true',
-      stateScopeDebug: localStorage.getItem('stateScopeDebug') === 'true'
-    };
+    try {
+      localStorage.setItem('bizDebug', 'true');
+      localStorage.setItem('stateScopeVerbose', 'true');
+      localStorage.setItem('stateScopeDebug', 'true');
+      window.bizDebug = true;
+      return {
+        ok: true,
+        bizDebug: localStorage.getItem('bizDebug') === 'true',
+        stateScopeVerbose: localStorage.getItem('stateScopeVerbose') === 'true',
+        stateScopeDebug: localStorage.getItem('stateScopeDebug') === 'true'
+      };
+    } catch (error) {
+      return { ok: false, error: String(error && error.message ? error.message : error) };
+    }
   })()`);
 
-  if (response.ok) {
-    ui.pageSettings = response.result;
-    ui.settingsMessage = '已写入 localStorage。请点击下方「刷新单据页」或 F5，刷新后顶栏应变为「已激活」。';
-  } else {
-    ui.settingsMessage = `写入失败：${response.error}`;
+  if (response.ok && response.result?.ok !== false) {
+    await readPageSettings();
+    ui.settingsMessage =
+      '已写入 bizDebug。injector 仅在页面加载时挂载，请点击「刷新单据页」或下方「一键开启并刷新」。';
+    showToast('已开启 bizDebug，请刷新单据页');
+    lastRefreshFingerprint = '';
+    return true;
+  }
+
+  ui.settingsMessage = `写入失败：${response.result?.error || response.error || '无法在单据页执行 eval'}`;
+  showToast(ui.settingsMessage);
+  return false;
+}
+
+async function enableAndReloadPage() {
+  const ok = await enableAllDebugSettings();
+  if (ok) {
+    await reloadInspectedPage();
   }
 }
 
@@ -336,6 +714,51 @@ function showToast(message) {
 
 function getCutoverReport() {
   return appState?.cutoverReport || null;
+}
+
+function getAllowlistMetaLine() {
+  const report = getCutoverReport();
+  const ps = ui.pageSettings || {};
+  const binding = ui.allowlistBinding || {};
+  const boName =
+    report?.boName || binding.boName || ps.allowlistBoName || ps.pageMeta?.boName || ui.lastSyncedBoName;
+  const version = report?.allowlistVersion || binding.version || ps.allowlistVersion;
+  const fieldCount = report?.summary?.totalFields || binding.fieldCount || ps.allowlistFieldCount;
+  const active = ps.allowlistActive || binding.active;
+
+  if (boName || active) {
+    const fieldPart = fieldCount ? `${fieldCount} 字段 · ` : '';
+    return `${boName || '—'} · allowlist v${version || '—'} · ${fieldPart}new轨 ${report?.hasNewChainObserved ? '已观测' : '未接入'}`;
+  }
+  return 'allowlist 未绑定';
+}
+
+function applyScenarioMarkLocally(tag, record, summary) {
+  if (!tag || !record) {
+    return;
+  }
+  if (!appState) {
+    appState = { runtime: null, epochs: [], selectedEpochId: null, issues: [], settings: {} };
+  }
+  if (!appState.scenarioReport) {
+    appState.scenarioReport = { scenarios: {}, summary: {}, updatedAt: Date.now() };
+  }
+  appState.scenarioReport.scenarios[tag] = record;
+  if (summary) {
+    appState.scenarioReport.summary = summary;
+  } else if (appState.scenarioReport.scenarios) {
+    const list = Object.values(appState.scenarioReport.scenarios);
+    appState.scenarioReport.summary = {
+      total: list.length,
+      pass: list.filter((item) => item.status === 'pass').length,
+      block: list.filter((item) => item.status === 'block').length,
+      inProgress: list.filter((item) => item.status === 'in_progress').length,
+      notStarted: list.filter((item) => item.status === 'not_started').length,
+      markedComplete: list.filter((item) => item.markedComplete).length
+    };
+  }
+  appState.scenarioReport.updatedAt = Date.now();
+  lastRefreshFingerprint = '';
 }
 
 function getCutoverVerdict(report) {
@@ -396,14 +819,29 @@ async function syncAllowlistToPage({ force = false } = {}) {
     return { ok: false, reason: 'auto-disabled' };
   }
 
+  // 页面 injector 已绑定（bundled / bridge），无需 Panel 再 fetch
+  if (!force && ps?.allowlistActive) {
+    ui.lastSyncedBoName = ps.allowlistBoName || ps.pageMeta?.boName || ui.lastSyncedBoName;
+    ui.allowlistBinding = {
+      boName: ps.allowlistBoName || ui.lastSyncedBoName,
+      version: ps.allowlistVersion,
+      fieldCount: ps.allowlistFieldCount,
+      active: true
+    };
+    if (ui.settingsMessage && /未找到|加载失败|injector 未就绪/.test(ui.settingsMessage)) {
+      ui.settingsMessage = '';
+    }
+    return { ok: true, reason: 'page-active' };
+  }
+
   const boName = await resolveBoNameForAllowlist();
   if (!force && boName && boName === ui.lastSyncedBoName && ps?.allowlistActive) {
     return { ok: true, reason: 'already-synced' };
   }
 
   const candidates = boName ?
-      [`${boName}.v1.json`, `${boName}.v1.example.json`, 'GoodsIssue.v1.json', 'GoodsIssue.v1.example.json']
-    : ['GoodsIssue.v1.json', 'GoodsIssue.v1.example.json'];
+      [`${boName}.v1.json`, `${boName}.v1.example.json`, 'OutsourceIssue.v1.json', 'GoodsIssue.v1.json']
+    : ['OutsourceIssue.v1.json', 'GoodsIssue.v1.json', 'GoodsIssue.v1.example.json'];
 
   for (const fileName of candidates) {
     try {
@@ -435,12 +873,26 @@ async function syncAllowlistToPage({ force = false } = {}) {
       );
       if (evalResult.ok && evalResult.result?.ok) {
         ui.lastSyncedBoName = config.boName || boName || ui.lastSyncedBoName;
+        ui.allowlistBinding = {
+          boName: evalResult.result.boName || config.boName,
+          version: evalResult.result.version || config.version,
+          fieldCount: evalResult.result.fieldCount || config.fields?.length || 0,
+          active: evalResult.result.active
+        };
+        ui.pageSettings = {
+          ...(ui.pageSettings || {}),
+          allowlistActive: !!evalResult.result.active,
+          allowlistBoName: ui.allowlistBinding.boName,
+          allowlistVersion: ui.allowlistBinding.version,
+          allowlistFieldCount: ui.allowlistBinding.fieldCount
+        };
+        lastRefreshFingerprint = '';
         ui.settingsMessage = evalResult.result.active ?
             `allowlist 已绑定：${evalResult.result.boName} v${evalResult.result.version}（${evalResult.result.fieldCount} 字段）`
           : `allowlist 已写入但未激活，boName=${evalResult.result.boName || '?'}`;
         return { ok: true, ...evalResult.result };
       }
-      if (evalResult.result?.error) {
+      if (force && evalResult.result?.error) {
         ui.settingsMessage = evalResult.result.error;
       }
     } catch {
@@ -448,10 +900,134 @@ async function syncAllowlistToPage({ force = false } = {}) {
     }
   }
 
-  ui.settingsMessage = boName ?
-      `未找到 ${boName} 的 allowlist 文件（allowlists/*.json）`
-    : '未识别 boName，且默认 GoodsIssue allowlist 加载失败';
+  if (force) {
+    ui.settingsMessage = boName ?
+        `未找到 ${boName} 的 allowlist 文件（allowlists/*.json）`
+      : '未识别 boName，且默认 GoodsIssue allowlist 加载失败';
+  }
   return { ok: false, reason: 'not-found' };
+}
+
+async function applyScenarioCatalogToPage(catalog) {
+  const payload = JSON.stringify(catalog);
+  return evalInPage(
+    `(function (config) {
+      if (!window.__StateScope__?.applyScenarioCatalog) {
+        return { ok: false, error: 'injector 未就绪或未升级' };
+      }
+      const applied = window.__StateScope__.applyScenarioCatalog(config);
+      const summary = window.__StateScope__.getScenarioCatalogSummary?.() || null;
+      return { ok: applied, summary };
+    })(${payload})`
+  );
+}
+
+async function applyScenarioCatalogBundle(catalog) {
+  if (tabId == null) {
+    return { ok: false, reason: 'no-tab' };
+  }
+  const swResponse = await chrome.runtime.sendMessage({
+    type: 'SS_APPLY_SCENARIO_CATALOG',
+    tabId,
+    catalog
+  });
+  if (!swResponse?.ok) {
+    return swResponse || { ok: false, error: '后台应用失败' };
+  }
+  // 使用 SW 归一化后的 pack（领域 SSOT → tag/steps/watchFields）
+  const normalized = swResponse.catalog || catalog;
+  rememberScenarioCatalog(normalized);
+  ui.lastSyncedScenarioCatalogKey = `${swResponse.boName}:${swResponse.version}`;
+  if (swResponse.scenarioReport) {
+    appState.scenarioReport = swResponse.scenarioReport;
+    hydrateScenarioReportFromCatalog();
+  }
+  await applyScenarioCatalogToPage(normalized);
+  await loadState();
+  return swResponse;
+}
+
+async function syncScenarioCatalogToBackground({ force = false, catalog = null } = {}) {
+  if (tabId == null) {
+    return { ok: false, reason: 'no-tab' };
+  }
+
+  if (catalog) {
+    return applyScenarioCatalogBundle(catalog);
+  }
+
+  const boName = await resolveBoNameForAllowlist();
+  const report = appState?.scenarioReport;
+  const expectedKey = `${boName || report?.boName || ''}:${report?.catalogVersion || ''}`;
+
+  if (
+    !force &&
+    boName &&
+    report?.boName === boName &&
+    isL3ScenarioReady(report)
+  ) {
+    ui.lastSyncedScenarioCatalogKey = expectedKey;
+    return { ok: true, reason: 'already-synced', boName: report.boName, version: report.catalogVersion };
+  }
+
+  if (!boName) {
+    return { ok: false, reason: 'no-boName', error: '未识别 boName，无法加载场景 checklist' };
+  }
+
+  try {
+    const bootstrap = await chrome.runtime.sendMessage({
+      type: 'SS_BOOTSTRAP_SCENARIO_CATALOG',
+      tabId,
+      boName,
+      force: force || report?.boName !== boName
+    });
+    if (bootstrap?.ok) {
+      if (bootstrap.catalog) {
+        rememberScenarioCatalog(bootstrap.catalog);
+        await applyScenarioCatalogToPage(bootstrap.catalog);
+      }
+      if (bootstrap.scenarioReport) {
+        appState = appState || {};
+        appState.scenarioReport = bootstrap.scenarioReport;
+        hydrateScenarioReportFromCatalog();
+      }
+      ui.lastSyncedScenarioCatalogKey = `${bootstrap.boName}:${bootstrap.version}`;
+      await loadState();
+      return bootstrap;
+    }
+    if (bootstrap?.needsUpload) {
+      return {
+        ok: false,
+        reason: 'needs-upload',
+        needsUpload: true,
+        boName,
+        error: bootstrap.error || `${boName} 请上传领域 *.scenarios.v1.json`
+      };
+    }
+  } catch {
+    // fall through
+  }
+
+  // 仅 GoodsIssue 可从扩展内 scenarios/*.json 补；其它 BO 强制上传 SSOT
+  if (boName === 'GoodsIssue') {
+    try {
+      const url = chrome.runtime.getURL('scenarios/GoodsIssue.L3.v1.json');
+      const response = await fetch(url);
+      if (response.ok) {
+        return applyScenarioCatalogBundle(await response.json());
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    ok: false,
+    reason: 'needs-upload',
+    needsUpload: true,
+    boName,
+    error: `${boName} 无内置场景包，请在「场景回归」上传领域 SSOT（*.scenarios.v1.json）`
+  };
 }
 
 function cutoverRowsToCsv(report) {
@@ -613,9 +1189,7 @@ function renderCutoverTab() {
   const report = getCutoverReport();
   const verdict = getCutoverVerdict(report);
   const summary = report?.summary || {};
-  const metaLine = report?.boName ?
-      `${report.boName} · allowlist v${report.allowlistVersion || '—'} · new轨 ${report.hasNewChainObserved ? '已观测' : '未接入'}`
-    : 'allowlist 未绑定';
+  const metaLine = getAllowlistMetaLine();
 
   return `<div class="cutover-page">
     ${renderVerdict(verdict)}
@@ -666,7 +1240,11 @@ function getPanelCtx() {
     renderVerdict,
     renderApp,
     bindAppEvents,
-    refresh
+    refresh,
+    syncScenarioCatalog: syncScenarioCatalogToBackground,
+    getScenarioReport: getScenarioReportForUi,
+    isL3ScenarioReady,
+    applyScenarioMarkLocally
   };
 }
 
@@ -698,23 +1276,32 @@ function renderChrome() {
 
   const headerMeta = document.getElementById('header-meta');
   if (headerMeta) {
-    const oldOk = diag.formController || diag.uiStateController;
+    const profile = meta.profile || epoch?.meta?.profile || '—';
+    const oldOk =
+      profile === 'lowcode' ?
+        diag.lowcodeViewModel
+      : diag.formController || diag.uiStateController;
+    const det = meta.profileDetection || diag.profileDetection;
+    const profileTitle = det?.reason ? esc(det.reason) : '';
+    const conf = det?.confidence ? ` · ${esc(det.confidence)}` : '';
+    const newOk =
+      profile === 'lowcode' ?
+        diag.mdfBizApplication || diag.mdfDoDispatch || diag.lowcodeViewModel
+      : diag.stateManager;
     headerMeta.innerHTML = `
       <span>单据 <strong>${esc(meta.boName || '(unknown)')}</strong></span>
       <span class="sep">|</span>
-      <span>Route ${esc(meta.route || '—')}</span>
-      <span class="sep">|</span>
-      <span>Profile ${esc(meta.profile || epoch?.meta?.profile || '—')}</span>
+      <span>Profile <strong title="${profileTitle}">${esc(profile)}</strong>${conf}</span>
       <span class="sep">|</span>
       <span>old <span class="${oldOk ? 'chain-ok' : 'chain-off'}">${oldOk ? '✓' : '✗'}</span></span>
-      <span>new <span class="${diag.stateManager ? 'chain-ok' : 'chain-off'}">${diag.stateManager ? '✓' : '✗'}</span></span>
+      <span>${profile === 'lowcode' ? 'shadow' : 'new'} <span class="${newOk ? 'chain-ok' : 'chain-off'}">${newOk ? '✓' : '✗'}</span></span>
     `;
   }
 
   const footer = document.getElementById('sidebar-footer');
   if (footer) {
     const count = appState?.epochs?.length || 0;
-    const pageEpochCount = ui.pageSettings?.pageSync?.epochs?.length || 0;
+    const pageEpochCount = getPageEpochCount();
     const updated = epoch?.timeLabel || '—';
     const relayWarn = ui.pageSettings?.relayBroken
       ? `<div class="footer-line footer-warn">通道断开：${esc(ui.pageSettings.relayError || '请 F5 刷新单据页')}</div>`
@@ -979,9 +1566,45 @@ function timelineStatusDot(status) {
   return 'dot-idle';
 }
 
+function renderTimelineEmptyHint() {
+  const ps = ui.pageSettings || {};
+  const diag = getRuntimeContext().diag;
+  const profile = ps.pageMeta?.profile || diag.profile || 'unknown';
+  const pageCache = getPageEpochCount();
+  const bgCount = appState?._bgEpochCount ?? appState?.epochs?.length ?? 0;
+  const lines = [];
+
+  if (!ps.bizDebug) {
+    lines.push('bizDebug 未开启 → 设置里点「一键开启并刷新」。');
+  } else if (pageCache > 0 && bgCount === 0) {
+    lines.push(`页面已有 ${pageCache} 条 Epoch 但未进 Panel → 点左下角「重新同步 Panel」。`);
+  } else if (profile === 'lowcode') {
+    lines.push('当前为低代码取证线：visibleToUser（getDisable/model 终值）vs shadowStore。');
+    lines.push('请确认：① stateScopeProfile=lowcode（或 auto 且 boName 已映射）② 扩展重载后 F5 单据页。');
+    lines.push('hook 就绪后改表头字段或触发 doDispatch，应出现 Epoch；勿用销货单 refreshView 口径。');
+    if (!diag.lowcodeViewModel) {
+      lines.push('未检测到 MDF viewModel → 等页面渲染完后点「重新挂 Hook」，或 F5。');
+    }
+  } else {
+    lines.push('当前为传统单据取证线：StateCollector / FormController.refreshView vs statePatches。');
+    lines.push('init-full 发生在 hook 安装之前时会丢失（刷新后常见）。');
+    lines.push('请确认：① 升级开关 ON  ② 先设场景  ③ 再刷新/重新进入新增页。');
+    lines.push('或 hook 就绪后改任意表头字段，应至少出现 1 条 Epoch。');
+    if (!diag.stateManager) {
+      lines.push('当前未检测到 stateManager → 升级开关可能未开，或 ServicePlus 未加载。');
+    }
+  }
+
+  return `<div class="empty timeline-empty-hint">
+    <div>尚无 Epoch</div>
+    <ul>${lines.map((line) => `<li>${esc(line)}</li>`).join('')}</ul>
+    <div class="subtle">Console 搜 <code>[StateScope] Epoch</code>；页眉链状态 ✓ 只表示 hook 目标已找到，不代表已有 Epoch。</div>
+  </div>`;
+}
+
 function renderTimelineList(epochs) {
   if (!epochs.length) {
-    return '<div class="empty">尚无 Epoch，请操作单据字段。</div>';
+    return renderTimelineEmptyHint();
   }
 
   return `<div class="timeline">${epochs
@@ -1000,7 +1623,7 @@ function renderTimelineList(epochs) {
         mismatch > 0 ? `${mismatch} mismatch`
         : changed > 0 ? `${changed} 字段变化`
         : '无变化';
-      const active = getSelectedEpoch()?.id === epoch.id ? ' active' : '';
+      const active = epochIdsEqual(getSelectedEpoch()?.id, epoch.id) ? ' active' : '';
 
       return `<button type="button" class="tl-item${active}" data-select-epoch="${epoch.id}">
         <div class="tl-time">${esc(epoch.timeLabel || '—')}</div>
@@ -1020,7 +1643,11 @@ function renderTimelineList(epochs) {
 
 function renderKeySummary(epoch) {
   if (!epoch) {
-    return '尚无 Epoch，请操作单据字段触发 refreshView。';
+    const profile = ui.pageSettings?.pageMeta?.profile || getRuntimeContext().diag?.profile;
+    if (profile === 'lowcode') {
+      return '尚无 Epoch，请操作字段触发 doDispatch（低代码线，非 refreshView）。';
+    }
+    return '尚无 Epoch，请操作单据字段触发 refreshView（传统线）。';
   }
   const steps = epoch.scopeFlow || [];
   if (steps.length) {
@@ -1049,6 +1676,40 @@ function renderDiffCounters(summary) {
   </div>`;
 }
 
+function renderActivationBanner(activation) {
+  if (activation.level === 'on') {
+    return '';
+  }
+
+  const hint = esc(activation.hint || '');
+  const intro =
+    activation.level === 'wait' ?
+      `StateScope ${esc(activation.label)}：${hint}`
+    : `StateScope 未激活：${hint}`;
+
+  const note =
+    activation.level === 'off' ?
+      '<div class="subtle" style="margin-top:6px">一键开启只写入 localStorage，不会立刻挂载 injector；写入后必须刷新单据页。</div>'
+    : '<div class="subtle" style="margin-top:6px">bizDebug 已开，刷新单据页后 StateScope 才会挂载到 presenter。</div>';
+
+  const actions =
+    activation.level === 'off' ?
+      `<div class="banner-actions">
+        <button type="button" class="btn primary" id="banner-enable-reload">一键开启并刷新</button>
+        <button type="button" class="btn" id="banner-enable-debug">仅写入 bizDebug</button>
+        <button type="button" class="btn" id="banner-reload-page">刷新单据页</button>
+      </div>`
+    : `<div class="banner-actions">
+        <button type="button" class="btn primary" id="banner-reload-page">刷新单据页</button>
+      </div>`;
+
+  return `<div class="banner warn activation-banner">
+    <div>${intro}</div>
+    ${note}
+    ${actions}
+  </div>`;
+}
+
 function renderQuickActions() {
   return `<div class="quick-actions">
     <button type="button" class="btn" id="action-copy-diagnose">复制 diagnoseLastEpoch</button>
@@ -1072,7 +1733,12 @@ function renderSectionCard(id, title, summary, bodyHtml, expanded) {
 
 function renderEpochDetailColumn(epoch, { showVerdict = false } = {}) {
   if (!epoch) {
-    return '<div class="empty">选择 Timeline 中的 Epoch 查看详情</div>';
+    const profile = ui.pageSettings?.pageMeta?.profile || getRuntimeContext().diag?.profile;
+    const hint =
+      profile === 'lowcode' ?
+        '选择 Timeline 中的 Epoch 查看详情（低代码：终值 vs shadowStore）'
+      : '选择 Timeline 中的 Epoch 查看详情（传统：StateCollector vs statePatches）';
+    return `<div class="empty">${hint}</div>`;
   }
 
   const changed = epoch.sections?.changedSet;
@@ -1138,11 +1804,7 @@ function renderOverview() {
   const epochs = appState?.epochs || [];
 
   if (activation.level !== 'on' && !epoch) {
-    const msg =
-      activation.level === 'wait' ?
-        `StateScope ${activation.label}：${activation.hint}`
-      : `StateScope 未激活：${activation.hint}。可前往「设置」一键开启后<strong>刷新单据页</strong>。`;
-    return `<div class="banner warn">${msg}</div>${renderQuickActions()}`;
+    return `${renderActivationBanner(activation)}${renderQuickActions()}`;
   }
 
   const impact = getEpochImpact(epoch);
@@ -1218,16 +1880,46 @@ function updateIssuesNavBadge() {
   }
 }
 
-function renderApp() {
+function buildRefreshFingerprint() {
+  const epoch = getSelectedEpoch();
+  const activation = getActivationState();
+  const report = getCutoverReport();
+  return [
+    ui.tab,
+    ui.selectedEpochId ?? '',
+    appState?.epochs?.length ?? 0,
+    appState?.updatedAt ?? 0,
+    activation.level,
+    ui.pageSettings?.bizDebug,
+    ui.pageSettings?.stateScopeInstalled,
+    ui.pageSettings?.allowlistActive,
+    ui.pageSettings?.allowlistBoName,
+    ui.pageSettings?.allowlistVersion,
+    ui.allowlistBinding?.boName,
+    ui.allowlistBinding?.version,
+    ui.pageSettings?.pageSyncEpochCount,
+    ui.pageSettings?.pageSyncSummary?.latestEpochId ?? '',
+    ui.pageSettings?.pageSyncSummary?.latestStartedAt ?? '',
+    epoch?.id ?? '',
+    epoch?.startedAt ?? '',
+    epoch?.diffSummary?.logicMismatch ?? '',
+    report?.updatedAt ?? 0,
+    (appState?.issues || []).length,
+    appState?.scenarioReport?.catalogVersion ?? '',
+    Object.keys(appState?.scenarioReport?.scenarios || {}).length,
+    appState?.scenarioReport?.updatedAt ?? 0,
+    appState?.scenarioReport?.summary?.markedComplete ?? 0,
+    ui.scenarioCatalog?.version ?? '',
+    ui.tab === 'scenarios' ? 'scenarios' : '',
+    JSON.stringify(ui.expanded)
+  ].join('|');
+}
+
+function renderMainPanel() {
   const root = document.getElementById('app');
   if (!root) {
     return;
   }
-
-  renderChrome();
-  updateCutoverNavBadge();
-  updateIssuesNavBadge();
-  window.StateScopeScenarioUI?.updateNavBadge(getPanelCtx());
 
   if (ui.tab === 'settings') {
     root.innerHTML = renderSettings();
@@ -1248,6 +1940,14 @@ function renderApp() {
   } else {
     root.innerHTML = renderOverview();
   }
+}
+
+function renderApp() {
+  renderChrome();
+  updateCutoverNavBadge();
+  updateIssuesNavBadge();
+  window.StateScopeScenarioUI?.updateNavBadge(getPanelCtx());
+  renderMainPanel();
 }
 
 async function exportDiagnosticJson() {
@@ -1297,9 +1997,12 @@ function filterDiffRows(rows, hasNewChain) {
 }
 
 function renderDiffLayer(epoch) {
+  const profile = epoch?.meta?.profile || ui.pageSettings?.pageMeta?.profile || 'traditional';
   const banner = epoch.hasNewChain ?
     ''
-  : `<div class="banner warn">new 轨未接入；以下为 old 预览，结果为「待接入」。</div>`;
+  : profile === 'lowcode' ?
+      `<div class="banner warn">shadow 轨未接入；以下为 getDisable/终值预览。需 M-MDF-1～3 applyStatePatches(shadow) 合入。</div>`
+    : `<div class="banner warn">new 轨未接入；以下为 old 预览，结果为「待接入」。</div>`;
   const groups = epoch.diffGroups || { main: [], details: [] };
   const mainRows = filterDiffRows(groups.main, epoch.hasNewChain);
   const focusPath = ui.diffFocusPath;
@@ -1372,6 +2075,44 @@ function getAllowlistBannerText() {
   return '当前无 allowlist，Diff 对比全部捕获字段；切流报告需在设置中加载 allowlist。';
 }
 
+function renderAllowlistCatalog(ps) {
+  const fields = ps?.allowlistFields || [];
+  if (!fields.length) {
+    return '<div class="empty subtle">allowlist 未绑定或无字段。绑定后此处显示 JSON 中的完整字段清单（无需先操作单据）。</div>';
+  }
+
+  const note = ps.allowlistNote ?
+      `<div class="subtle allowlist-note">${esc(ps.allowlistNote)}</div>`
+    : '';
+
+  return `${note}<div class="cutover-table-wrap allowlist-catalog">
+    <table class="cutover-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>path</th>
+          <th>stateType</th>
+          <th>configKey</th>
+          <th>oldEntry</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${fields
+          .map(
+            (item, index) => `<tr>
+              <td>${index + 1}</td>
+              <td><div class="field-name">${esc(item.path)}</div></td>
+              <td>${esc(item.stateType || '—')}</td>
+              <td>${esc(item.configKey || '—')}</td>
+              <td class="field-path">${esc(item.oldEntry || '—')}</td>
+            </tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>
+  </div>`;
+}
+
 function renderSettings() {
   const ps = ui.pageSettings || {};
   const rows = DEBUG_KEYS.map(({ key, label, desc }) => {
@@ -1388,18 +2129,45 @@ function renderSettings() {
         `已写入 cache [${ps.loadedAllowlistKeys.join(', ')}] 但未匹配当前 boName`
       : '未绑定（Diff 全量）';
   const autoAllowlistOn = ps.stateScopeAutoAllowlist !== false;
+  const profileMode = ps.stateScopeProfile || 'auto';
+  const profileDet = ps.profileDetection || {};
+  const profileRows = PROFILE_OPTIONS.map(
+    (opt) => `<option value="${esc(opt.value)}" ${profileMode === opt.value ? 'selected' : ''}>${esc(opt.label)}</option>`
+  ).join('');
 
   const msg = ui.settingsMessage ?
-      `<div class="banner ${ui.settingsMessage.includes('失败') ? 'warn' : ''}">${esc(ui.settingsMessage)}</div>`
+      `<div class="banner ${ui.settingsMessage.includes('失败') || ui.settingsMessage.includes('未找到') ? 'warn' : 'info'}">${esc(ui.settingsMessage)}</div>`
     : '';
 
   return `${msg}<div class="card">
     <h3>DevTools 设置</h3>
     <div class="settings-actions">
-      <button type="button" class="btn primary" id="enable-all-debug">一键开启 StateScope 调试</button>
+      <button type="button" class="btn primary" id="enable-all-debug">一键开启 bizDebug</button>
+      <button type="button" class="btn primary" id="enable-and-reload">一键开启并刷新</button>
       <button type="button" class="btn" id="reload-page">刷新单据页</button>
+      <button type="button" class="btn" id="rediscover-hooks">重新挂 Hook</button>
     </div>
     ${rows}
+  </div>
+  <div class="card">
+    <h3>验证 Profile</h3>
+    <div class="settings-row">
+      <div>
+        <div>当前模式</div>
+        <div class="subtle">${esc(profileDet.reason || '—')}${profileDet.confidence ? ` · 置信度 ${esc(profileDet.confidence)}` : ''}</div>
+      </div>
+      <span class="chip on">${esc(profileDet.effectiveProfile || profileDet.profile || ps.pageMeta?.profile || '—')}</span>
+    </div>
+    <div class="settings-form">
+      <label>
+        stateScopeProfile
+        <select id="profile-mode-select">${profileRows}</select>
+      </label>
+      <div class="subtle" style="margin-top:6px">切换后需刷新单据页以重装 hook（与 bizDebug 相同）。</div>
+    </div>
+    <div class="settings-actions">
+      <button type="button" class="btn primary" id="apply-profile-mode">应用 Profile 并刷新</button>
+    </div>
   </div>
   <div class="card">
     <h3>Allowlist</h3>
@@ -1422,13 +2190,23 @@ function renderSettings() {
       <button type="button" class="btn" id="toggle-auto-allowlist">${autoAllowlistOn ? '关闭自动加载' : '开启自动加载'}</button>
       <button type="button" class="btn" id="resync-allowlist-settings">重新加载 allowlist</button>
     </div>
+    <div class="allowlist-catalog-head">
+      <div>字段清单（${ps.allowlistFieldCount || 0}）</div>
+      <div class="subtle">${ps.allowlistBoName ? esc(ps.allowlistBoName) : '—'}${ps.allowlistVersion ? ` · v${esc(ps.allowlistVersion)}` : ''}</div>
+    </div>
+    ${renderAllowlistCatalog(ps)}
   </div>
   ${window.StateScopeIssuesUI ? window.StateScopeIssuesUI.renderJiraSettings(getIssuesCtx()) : ''}`;
 }
 
 async function selectEpoch(epochId) {
-  ui.selectedEpochId = Number(epochId);
-  await chrome.runtime.sendMessage({ type: 'SS_SELECT_EPOCH', tabId, epochId: ui.selectedEpochId });
+  const id = normalizeEpochId(epochId);
+  ui.selectedEpochId = id;
+  ui.epochFollowLatest = epochIdsEqual(id, getLatestEpochId());
+  if (appState) {
+    appState.selectedEpochId = id;
+  }
+  await safeRuntimeMessage({ type: 'SS_SELECT_EPOCH', tabId, epochId: id });
 }
 
 function bindAppEvents() {
@@ -1459,14 +2237,6 @@ function bindAppEvents() {
           document.querySelector('.field-row.focused')?.scrollIntoView({ block: 'center' });
         });
       }
-    });
-  });
-
-  root.querySelectorAll('[data-select-epoch]').forEach((el) => {
-    el.addEventListener('click', async () => {
-      await selectEpoch(el.getAttribute('data-select-epoch'));
-      renderApp();
-      bindAppEvents();
     });
   });
 
@@ -1553,17 +2323,80 @@ function bindAppEvents() {
     });
   }
 
+  document.getElementById('banner-enable-reload')?.addEventListener('click', async () => {
+    await enableAndReloadPage();
+    renderApp();
+    bindAppEvents();
+  });
+  document.getElementById('banner-enable-debug')?.addEventListener('click', async () => {
+    await enableAllDebugSettings();
+    renderApp();
+    bindAppEvents();
+  });
+  document.getElementById('banner-reload-page')?.addEventListener('click', reloadInspectedPage);
+
   const enableAll = document.getElementById('enable-all-debug');
   if (enableAll) {
     enableAll.addEventListener('click', async () => {
-      enableAll.disabled = true;
       await enableAllDebugSettings();
       renderApp();
       bindAppEvents();
     });
   }
 
+  document.getElementById('enable-and-reload')?.addEventListener('click', async () => {
+    await enableAndReloadPage();
+    renderApp();
+    bindAppEvents();
+  });
+
   document.getElementById('reload-page')?.addEventListener('click', reloadInspectedPage);
+
+  document.getElementById('apply-profile-mode')?.addEventListener('click', async () => {
+    const mode = document.getElementById('profile-mode-select')?.value || 'auto';
+    await evalInPage(`(function () {
+      if (window.__StateScope__?.setProfileMode) {
+        window.__StateScope__.setProfileMode(${JSON.stringify(mode)});
+      } else {
+        localStorage.setItem('stateScopeProfile', ${JSON.stringify(mode)});
+      }
+      localStorage.setItem('bizDebug', 'true');
+      location.reload();
+      return { ok: true };
+    })()`);
+    ui.settingsMessage = `Profile 已设为 ${mode}，正在刷新单据页…`;
+    showToast(ui.settingsMessage);
+  });
+
+  document.getElementById('rediscover-hooks')?.addEventListener('click', async () => {
+    const response = await evalInPage(`(function () {
+      if (!window.__StateScope__?.rediscover) {
+        return { ok: false, error: 'injector 未就绪，请先刷新单据页' };
+      }
+      const meta = window.__StateScope__.rediscover();
+      window.__StateScope__.syncPanelState?.();
+      return {
+        ok: true,
+        boName: meta?.boName,
+        stateManager: !!meta?.diagnostics?.stateManager,
+        formController: !!meta?.diagnostics?.formController
+      };
+    })()`);
+    if (response.ok && response.result?.ok !== false) {
+      const profile = ui.pageSettings?.pageMeta?.profile || '—';
+      ui.settingsMessage =
+        profile === 'lowcode' ?
+          `Hook 已重挂（lowcode）：boName=${response.result.boName || '—'}。请改表头字段触发 doDispatch。`
+        : `Hook 已重挂（traditional）：stateManager=${response.result.stateManager ? '✓' : '✗'} formController=${response.result.formController ? '✓' : '✗'}。请重新进入新增页或改一个字段。`;
+      showToast('Hook 已重新挂载');
+    } else {
+      ui.settingsMessage = response.result?.error || response.error || '重新挂 Hook 失败';
+      showToast(ui.settingsMessage);
+    }
+    await resyncPanelFromPage();
+    renderApp();
+    bindAppEvents();
+  });
 
   document.getElementById('export-cutover-json')?.addEventListener('click', exportCutoverJson);
   document.getElementById('export-cutover-csv')?.addEventListener('click', exportCutoverCsv);
@@ -1572,6 +2405,7 @@ function bindAppEvents() {
     ui.lastSyncedBoName = null;
     const result = await syncAllowlistToPage({ force: true });
     await readPageSettings();
+    lastRefreshFingerprint = '';
     showToast(result.ok ? ui.settingsMessage || 'allowlist 已绑定' : ui.settingsMessage || 'allowlist 加载失败');
     renderApp();
     bindAppEvents();
@@ -1594,6 +2428,7 @@ function bindAppEvents() {
     ui.lastSyncedBoName = null;
     const result = await syncAllowlistToPage({ force: true });
     await readPageSettings();
+    lastRefreshFingerprint = '';
     if (!result.ok && !ui.settingsMessage) {
       ui.settingsMessage = 'allowlist 加载失败，请确认扩展已 reload 且 allowlists/GoodsIssue.v1.json 存在';
     }
@@ -1617,33 +2452,112 @@ function bindTabs() {
     tab.addEventListener('click', async () => {
       ui.tab = tab.getAttribute('data-tab');
       syncNavActive();
-      if (ui.tab === 'settings') {
-        await readPageSettings();
-      }
-      renderApp();
-      bindAppEvents();
+      await refresh({ force: true });
     });
   });
 }
 
-async function refresh() {
-  await readPageSettings();
-  await loadState();
-  applyPageSyncToAppState();
-  await syncFromPageIfNeeded();
-  await loadState();
-  applyPageSyncToAppState();
-  if (window.StateScopeIssuesUI) {
-    await window.StateScopeIssuesUI.readScenarioFromPage(getPanelCtx());
+function shouldLoadFullPageSync(force) {
+  if (force) {
+    return true;
   }
-  await syncAllowlistToPage();
-  renderApp();
-  bindAppEvents();
+  if (!ui.pageSettings?.stateScopeInstalled) {
+    return false;
+  }
+  const summaryCount = ui.pageSettings?.pageSyncEpochCount ?? 0;
+  if (summaryCount !== lastPageSyncEpochCount) {
+    return true;
+  }
+  const latestId = ui.pageSettings?.pageSyncSummary?.latestEpochId ?? null;
+  if (latestId != null && latestId !== lastSyncedLatestEpochId) {
+    return true;
+  }
+  const needsEpochUi = ['overview', 'timeline', 'diff'].includes(ui.tab);
+  if (!needsEpochUi) {
+    return false;
+  }
+  return !ui.pageSettings?.pageSync?.epochs?.length || !(appState?.epochs?.length);
+}
+
+async function refresh({ force = false } = {}) {
+  if (refreshInFlight) {
+    pendingRefresh = true;
+    return;
+  }
+  refreshInFlight = true;
+  try {
+    await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+
+    if (shouldLoadFullPageSync(force) && ui.pageSettings?.stateScopeInstalled) {
+      await readPageSyncFull();
+    }
+
+    await loadState();
+    applyPageSyncToAppState();
+
+    await syncFromPageIfNeeded();
+    await loadState();
+    applyPageSyncToAppState();
+    maybeSelectLatestEpoch();
+
+    if (window.StateScopeIssuesUI) {
+      await window.StateScopeIssuesUI.readScenarioFromPage(getPanelCtx());
+    }
+    await ensureLocalScenarioCatalog();
+    await syncAllowlistToPage();
+    await syncScenarioCatalogToBackground();
+    hydrateScenarioReportFromCatalog();
+    if (ui.tab === 'scenarios') {
+      lastRefreshFingerprint = '';
+    }
+
+    renderChrome();
+    updateCutoverNavBadge();
+    updateIssuesNavBadge();
+    window.StateScopeScenarioUI?.updateNavBadge(getPanelCtx());
+
+    const fp = buildRefreshFingerprint();
+    if (force || fp !== lastRefreshFingerprint) {
+      lastRefreshFingerprint = fp;
+      renderMainPanel();
+      bindAppEvents();
+    }
+  } finally {
+    refreshInFlight = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      setTimeout(() => {
+        refresh({ force: true });
+      }, 0);
+    }
+  }
+}
+
+function bindEpochSelection() {
+  const root = document.getElementById('app');
+  if (!root || root.__stateScopeEpochBound) {
+    return;
+  }
+  root.__stateScopeEpochBound = true;
+  root.addEventListener('click', (event) => {
+    const el = event.target.closest('[data-select-epoch]');
+    if (!el) {
+      return;
+    }
+    event.preventDefault();
+    void (async () => {
+      await selectEpoch(el.getAttribute('data-select-epoch'));
+      lastRefreshFingerprint = '';
+      renderApp();
+      bindAppEvents();
+    })();
+  });
 }
 
 function init() {
   tabId = chrome.devtools?.inspectedWindow?.tabId ?? null;
   bindTabs();
+  bindEpochSelection();
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'SS_STATE_UPDATED' && message.tabId === tabId) {
@@ -1651,8 +2565,13 @@ function init() {
     }
   });
 
-  refresh();
-  setInterval(refresh, 2000);
+  refresh({ force: true });
+  refreshTimerId = setInterval(() => {
+    if (document.hidden || runtimeMessageFailures >= MAX_RUNTIME_MESSAGE_FAILURES) {
+      return;
+    }
+    refresh();
+  }, PANEL_REFRESH_MS);
 }
 
 init();

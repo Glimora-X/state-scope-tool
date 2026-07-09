@@ -1,4 +1,5 @@
 import { LOG_PREFIX } from './activate.js';
+import { isConsoleOutputEnabled } from './path-filter.js';
 
 /**
  * 不使用 console.group / groupCollapsed。
@@ -10,6 +11,9 @@ const rawLog =
     : () => {};
 
 export function scopeLog(...args) {
+  if (!isConsoleOutputEnabled()) {
+    return;
+  }
   rawLog(LOG_PREFIX, ...args);
 }
 

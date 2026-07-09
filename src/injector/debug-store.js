@@ -24,6 +24,7 @@ export function storeEpoch(epoch, meta) {
     finalSnap: { ...epoch.finalSnap },
     oldSnap: { ...epoch.oldSnap },
     newSnap: { ...epoch.newSnap },
+    shadowSnap: { ...epoch.shadowSnap },
     storedAt: Date.now()
   };
 

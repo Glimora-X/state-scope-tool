@@ -1,0 +1,258 @@
+{
+  "boName": "GoodsIssue",
+  "version": "2026-06-29-l3-v1",
+  "title": "销货单 Phase 1 · L3 逐步操作",
+  "allowlistVersion": "2026-06-29-pilot-v2",
+  "note": "与 allowlists/GoodsIssue.v1.json 及 app-service-plus state/goodsIssueStateRules.ts 对齐；Panel 场景回归 Tab 可导入/自动加载",
+  "scenarios": [
+    {
+      "tag": "gi-prep",
+      "order": 0,
+      "group": "0 · 准备",
+      "label": "P0–P3 验证前准备",
+      "checkpoint": "升级开关 ON · bizDebug · allowlist 16 字段 · StateScope 扩展已重载",
+      "signOffMode": "manual",
+      "watchFields": [],
+      "steps": [
+        { "id": "P0", "action": "打开销货单 → 新增（蓝单）", "expect": "页面正常加载" },
+        { "id": "P1", "action": "工具栏打开升级开关（isUpgradedVoucher）", "expect": "使用 GoodsIssueServicePlus" },
+        { "id": "P2", "action": "Console：localStorage.setItem('bizDebug','true') 后刷新", "expect": "出现 [StateScope] 日志" },
+        { "id": "P3", "action": "Panel → 切流报告", "expect": "显示 16 个 allowlist 字段" }
+      ]
+    },
+    {
+      "tag": "gi-s0-init",
+      "order": 10,
+      "group": "S0 · init-full",
+      "label": "S0 新增蓝单 init 初始态",
+      "checkpoint": "init-full statePatches 驱动试点字段初始 visible/disabled",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "main.isOffsetReturn", "stateType": "visible" },
+        { "path": "main.exchangeRate", "stateType": "disabled" },
+        { "path": "main.currencyId", "stateType": "disabled" },
+        { "path": "goodsItems.{uuid}.trans2Qty", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.promoUsedStatusEnum", "stateType": "visible" }
+      ],
+      "steps": [
+        { "id": "S0-1", "action": "新增销货单（蓝单，本位币客户）", "expect": "isOffsetReturn 不显示" },
+        { "id": "S0-2", "action": "同上", "expect": "exchangeRate 禁用（本位币）" },
+        { "id": "S0-3", "action": "同上", "expect": "currencyId 可编辑（手工单无来源）" },
+        { "id": "S0-4", "action": "票据类型未选/为空", "expect": "无税单价/金额、税率/税额列隐藏" },
+        { "id": "S0-5", "action": "空明细行", "expect": "数量2/单位2 隐藏；促销使用状态列隐藏" }
+      ]
+    },
+    {
+      "tag": "gi-t1-offset",
+      "order": 20,
+      "group": "T1 · isOffsetReturn",
+      "label": "T1 退冲销货 visible + disabled",
+      "checkpoint": "红单显示；SalesStockout 来源禁用",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "main.isOffsetReturn", "stateType": "visible" },
+        { "path": "main.isOffsetReturn", "stateType": "disabled" }
+      ],
+      "steps": [
+        { "id": "T1-1", "action": "新增蓝单", "expect": "isOffsetReturn 不可见" },
+        { "id": "T1-2", "action": "表头红蓝单 → 红单", "expect": "isOffsetReturn 显示" },
+        { "id": "T1-3", "action": "选单生单：来源销售出库单 → 红单", "expect": "显示且禁用（灰）" },
+        { "id": "T1-4", "action": "选单生单：来源期初销售出库 → 红单", "expect": "显示且禁用" },
+        { "id": "T1-5", "action": "手工红单（无 SalesStockout 来源）", "expect": "显示且可编辑" }
+      ]
+    },
+    {
+      "tag": "gi-t2-exchange",
+      "order": 30,
+      "group": "T2 · exchangeRate",
+      "label": "T2 汇率 disabled",
+      "checkpoint": "本位币禁用汇率；外币可编辑",
+      "signOffMode": "allowlist",
+      "watchFields": [{ "path": "main.exchangeRate", "stateType": "disabled" }],
+      "steps": [
+        { "id": "T2-1", "action": "新增蓝单，客户本位币", "expect": "汇率禁用" },
+        { "id": "T2-2", "action": "新增蓝单，客户外币 / 改 currencyId 为外币", "expect": "汇率可编辑" }
+      ]
+    },
+    {
+      "tag": "gi-t3-currency",
+      "order": 40,
+      "group": "T3 · currencyId",
+      "label": "T3 币种 disabled",
+      "checkpoint": "流转生单禁用币种；返利结算单来源除外",
+      "signOffMode": "allowlist",
+      "watchFields": [{ "path": "main.currencyId", "stateType": "disabled" }],
+      "steps": [
+        { "id": "T3-1", "action": "手工新增蓝单", "expect": "币种可改" },
+        { "id": "T3-2", "action": "选单生单：来源销售订单（带币种）", "expect": "币种禁用" },
+        { "id": "T3-3", "action": "选单生单：来源返利结算单 RebateSettlementForCust", "expect": "币种仍可改" }
+      ]
+    },
+    {
+      "tag": "gi-t4-note-visible",
+      "order": 50,
+      "group": "T4 · 票据类型",
+      "label": "T4 价税列 visible（noteTypeEnum）",
+      "checkpoint": "无税列/税率列随票据类型显隐",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "goodsItems.{uuid}.netPriceWithoutTax", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.netAmountWithoutTax", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.taxPct", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.netTax", "stateType": "visible" }
+      ],
+      "steps": [
+        { "id": "T4-1", "action": "票据类型空 / 未选", "expect": "四列均隐藏" },
+        { "id": "T4-2", "action": "选不开票 NO_INVOICE", "expect": "四列均隐藏" },
+        { "id": "T4-3", "action": "选其他票据 RECEIPT", "expect": "四列均隐藏" },
+        { "id": "T4-4", "action": "选普通发票 NORMORL_INVOICE", "expect": "四列均显示" },
+        { "id": "T4-5", "action": "选专用发票 SPECIAL_INVOICE", "expect": "四列均显示" },
+        { "id": "T4-6", "action": "不开票 ↔ 普票来回切换", "expect": "列显隐切换正确，无残留" }
+      ]
+    },
+    {
+      "tag": "gi-t5-price-disabled",
+      "order": 60,
+      "group": "T5 · 价税 disabled",
+      "label": "T5 价税列 disabled（行级）",
+      "checkpoint": "无商品/赠品/兑商品行禁用价税列",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "goodsItems.{uuid}.netPriceWithoutTax", "stateType": "disabled" },
+        { "path": "goodsItems.{uuid}.netAmountWithoutTax", "stateType": "disabled" },
+        { "path": "goodsItems.{uuid}.taxPct", "stateType": "disabled" },
+        { "path": "goodsItems.{uuid}.netTax", "stateType": "disabled" }
+      ],
+      "steps": [
+        { "id": "T5-0", "action": "前提：票据类型 = 普票/专票", "expect": "价税列已显示" },
+        { "id": "T5-1", "action": "空行不选商品", "expect": "列显示但不可编辑" },
+        { "id": "T5-2", "action": "选普通商品行", "expect": "可编辑" },
+        { "id": "T5-3", "action": "赠品行 isFreeGift", "expect": "禁用" },
+        { "id": "T5-4", "action": "兑商品行 rebateTypeEnum=PRODUCT", "expect": "禁用" },
+        { "id": "T5-5", "action": "有商品行清空 productId", "expect": "恢复禁用" }
+      ]
+    },
+    {
+      "tag": "gi-t6-trans2",
+      "order": 70,
+      "group": "T6 · 浮动辅单位",
+      "label": "T6 数量2 / 单位2 visible",
+      "checkpoint": "auxUomIsFloating 控制两列显隐",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "goodsItems.{uuid}.trans2Qty", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.trans2UomId", "stateType": "visible" }
+      ],
+      "steps": [
+        { "id": "T6-1", "action": "选非浮动辅单位商品", "expect": "数量2、单位2 隐藏" },
+        { "id": "T6-2", "action": "选浮动辅单位商品 auxUomIsFloating=true", "expect": "两列显示" },
+        { "id": "T6-3", "action": "同行换为非浮动商品", "expect": "两列隐藏" },
+        { "id": "T6-4", "action": "复制行 / 插行后分别选商品", "expect": "各行独立显隐，不串 uuid" }
+      ]
+    },
+    {
+      "tag": "gi-t7-promo",
+      "order": 80,
+      "group": "T7 · 促销使用状态",
+      "label": "T7 promoUsedStatusEnum",
+      "checkpoint": "有促销显示列；原单退货/期初行禁用",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "goodsItems.{uuid}.promoUsedStatusEnum", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.promoUsedStatusEnum", "stateType": "disabled" }
+      ],
+      "steps": [
+        { "id": "T7-1", "action": "蓝单明细无促销", "expect": "促销使用状态列隐藏" },
+        { "id": "T7-2", "action": "任一行匹配单品促销 detailPromoList 非空", "expect": "列显示" },
+        { "id": "T7-3", "action": "原单退货 refBoName=GoodsIssue", "expect": "列隐藏" },
+        { "id": "T7-4", "action": "明细行来源期初销货单", "expect": "该格禁用" },
+        { "id": "T7-5", "action": "普通行非期初、非原单退货", "expect": "可编辑" }
+      ]
+    },
+    {
+      "tag": "gi-x-edit",
+      "order": 90,
+      "group": "X · 横切",
+      "label": "X1 编辑已有单",
+      "checkpoint": "打开已保存单 init 态与 S0 语义一致",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "main.exchangeRate", "stateType": "disabled" },
+        { "path": "goodsItems.{uuid}.netPriceWithoutTax", "stateType": "visible" }
+      ],
+      "steps": [
+        { "id": "X1", "action": "打开已保存销货单（编辑）", "expect": "试点列 init 态正确，L2 无 mismatch" }
+      ]
+    },
+    {
+      "tag": "gi-x-copy",
+      "order": 91,
+      "group": "X · 横切",
+      "label": "X2 复制新增",
+      "checkpoint": "复制含外币/促销/浮动辅单位单据",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "main.currencyId", "stateType": "disabled" },
+        { "path": "goodsItems.{uuid}.trans2Qty", "stateType": "visible" }
+      ],
+      "steps": [
+        { "id": "X2", "action": "复制一张复杂销货单", "expect": "试点列 init 态与源单业务语义一致" }
+      ]
+    },
+    {
+      "tag": "gi-x-view",
+      "order": 92,
+      "group": "X · 横切",
+      "label": "X3 查看态",
+      "checkpoint": "查看态 disabled 不因迁移额外错乱",
+      "signOffMode": "manual",
+      "watchFields": [],
+      "steps": [
+        { "id": "X3", "action": "切换单据为查看/只读", "expect": "试点列状态合理，无异常闪烁" }
+      ]
+    },
+    {
+      "tag": "gi-x-row-crud",
+      "order": 93,
+      "group": "X · 横切",
+      "label": "X4 明细增删复制行",
+      "checkpoint": "uuid 下行状态不串、不残留",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "goodsItems.{uuid}.trans2Qty", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.netPriceWithoutTax", "stateType": "disabled" }
+      ],
+      "steps": [
+        { "id": "X4-1", "action": "删行 → 插行 → 复制行", "expect": "新 uuid 试点列正确" },
+        { "id": "X4-2", "action": "删行后", "expect": "旧 uuid 状态无残留" }
+      ]
+    },
+    {
+      "tag": "gi-x-header-linkage",
+      "order": 94,
+      "group": "X · 横切",
+      "label": "X5 表头联动",
+      "checkpoint": "仅价税相关列变化，不全表闪烁",
+      "signOffMode": "allowlist",
+      "watchFields": [
+        { "path": "goodsItems.{uuid}.taxPct", "stateType": "visible" },
+        { "path": "goodsItems.{uuid}.netTax", "stateType": "visible" }
+      ],
+      "steps": [
+        { "id": "X5", "action": "仅改表头 noteTypeEnum", "expect": "价税列显隐变化；其它试点列稳定" }
+      ]
+    },
+    {
+      "tag": "gi-x-validate-info",
+      "order": 95,
+      "group": "X · 横切",
+      "label": "X6 validateInfo 并行",
+      "checkpoint": "业务校验仍走 validateInfo，不干扰 statePatches",
+      "signOffMode": "manual",
+      "watchFields": [],
+      "steps": [
+        { "id": "X6", "action": "明细 transQty=0 尝试保存", "expect": "仍报 validateInfo 错误；visible/disabled 正常" }
+      ]
+    }
+  ]
+}

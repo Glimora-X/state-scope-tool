@@ -21,3 +21,24 @@ export function getPanelSyncPayload() {
     epochs: [...epochPayloadCache]
   };
 }
+
+/** Panel 轮询用：不含 sections/diffs 等大对象 */
+export function getPanelSyncSummary() {
+  return {
+    runtime: runtimePayloadCache,
+    epochCount: epochPayloadCache.length,
+    latestEpochId: epochPayloadCache[0]?.id ?? null,
+    latestStartedAt: epochPayloadCache[0]?.startedAt ?? null,
+    epochSummaries: epochPayloadCache.map((item) => ({
+      id: item.id,
+      trigger: item.trigger,
+      phase: item.phase,
+      startedAt: item.startedAt,
+      timeLabel: item.timeLabel,
+      counts: item.counts,
+      diffSummary: item.diffSummary,
+      hasNewChain: item.hasNewChain,
+      meta: item.meta
+    }))
+  };
+}

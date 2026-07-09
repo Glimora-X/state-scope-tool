@@ -13,6 +13,18 @@ export function buildAllowlistPathSet(config) {
   return set;
 }
 
+export function isSnapKeyInAllowlistSet(snapKey, allowlistPathSet) {
+  if (!allowlistPathSet?.size) {
+    return true;
+  }
+  for (const allowPath of allowlistPathSet) {
+    if (matchAllowlistPath(allowPath, snapKey)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function stripStateSuffix(path) {
   return String(path).replace(/\.(visible|disabled)$/, '');
 }

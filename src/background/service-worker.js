@@ -10,6 +10,7 @@ import {
   markScenarioComplete,
   resetScenarioReport
 } from './scenario-report-accumulator.js';
+import { getBundledScenarioPack, normalizeScenarioPack } from '../shared/scenario-catalog.js';
 import {
   clearJiraToken,
   getJiraCredentials,
@@ -22,14 +23,90 @@ import { slimEpochForStorage } from '../shared/slim-epoch.js';
 
 const MAX_EPOCHS = 30;
 const tabStore = new Map();
+const GOODS_ISSUE_L3_VERSION = '2026-06-29-l3-v1';
 
-function emptyTabState() {
+function resolveBundledScenarioPack(boName) {
+  // 仅 GoodsIssue 有内置包；其它 BO 禁止跨 BO fallback，须上传领域 SSOT
+  return getBundledScenarioPack(boName);
+}
+
+function hasMatchingScenarioCatalog(state, boName) {
+  const pack = state.scenarioCatalogPack;
+  if (!pack?.scenarios?.length) {
+    return false;
+  }
+  if (boName && pack.boName && pack.boName !== boName) {
+    return false;
+  }
+  if (pack.boName === 'GoodsIssue' && pack.version === GOODS_ISSUE_L3_VERSION) {
+    return true;
+  }
+  // 用户上传的领域 SSOT / 工具 L3：同 boName 且有场景即视为已就绪
+  return !!pack.boName && pack.scenarios.length > 0;
+}
+
+function ensureScenarioCatalog(state, boName, { force = false } = {}) {
+  if (!state) {
+    return { ok: false, error: '无 tab 状态' };
+  }
+
+  const targetBo = boName || state.runtime?.meta?.boName || '';
+  if (!force && hasMatchingScenarioCatalog(state, targetBo)) {
+    return {
+      ok: true,
+      applied: false,
+      reason: 'already-has-catalog',
+      boName: state.scenarioCatalogPack.boName,
+      version: state.scenarioCatalogPack.version,
+      scenarioCount: state.scenarioCatalogPack.scenarios.length,
+      catalog: state.scenarioCatalogPack,
+      scenarioReport: state.scenarioReport
+    };
+  }
+
+  if (!targetBo) {
+    return { ok: false, error: '无 boName，无法选择场景包', needsUpload: true };
+  }
+
+  const bundled = resolveBundledScenarioPack(targetBo);
+  if (!bundled) {
+    // 清空错误 BO 的旧包，避免 OutsourceIssue 页残留销货单 checklist
+    if (force || (state.scenarioCatalogPack?.boName && state.scenarioCatalogPack.boName !== targetBo)) {
+      state.scenarioCatalogPack = null;
+      state.scenarioReport = emptyScenarioReport(null);
+      state.updatedAt = Date.now();
+    }
+    return {
+      ok: false,
+      error: `${targetBo} 无内置场景包，请上传领域 *.scenarios.v1.json（SSOT）`,
+      needsUpload: true,
+      boName: targetBo
+    };
+  }
+
+  state.scenarioCatalogPack = bundled;
+  state.scenarioReport = emptyScenarioReport(bundled);
+  state.updatedAt = Date.now();
+  return {
+    ok: true,
+    applied: true,
+    boName: bundled.boName,
+    version: bundled.version,
+    scenarioCount: bundled.scenarios.length,
+    catalog: bundled,
+    scenarioReport: state.scenarioReport
+  };
+}
+
+function emptyTabState(catalogPack) {
+  const pack = catalogPack || null;
   return {
     runtime: null,
     epochs: [],
     selectedEpochId: null,
     cutoverReport: emptyCutoverReport(),
-    scenarioReport: emptyScenarioReport(),
+    scenarioCatalogPack: pack,
+    scenarioReport: emptyScenarioReport(pack),
     updatedAt: 0
   };
 }
@@ -43,7 +120,7 @@ function getTabState(tabId) {
 
 function rebuildDerivedReports(state) {
   let cutoverReport = emptyCutoverReport();
-  let scenarioReport = emptyScenarioReport();
+  let scenarioReport = emptyScenarioReport(state.scenarioCatalogPack);
   for (const epoch of [...state.epochs].reverse()) {
     cutoverReport = accumulateCutoverReport(cutoverReport, epoch);
     scenarioReport = accumulateScenarioReport(scenarioReport, epoch);
@@ -67,7 +144,13 @@ async function bulkSyncTabState(tabId, { runtime, epochs }) {
     state.epochs = [...merged.values()]
       .sort((a, b) => (b.startedAt || b.id) - (a.startedAt || a.id))
       .slice(0, MAX_EPOCHS);
-    state.selectedEpochId = state.epochs[0]?.id ?? state.selectedEpochId;
+    const latestId = state.epochs[0]?.id ?? null;
+    const selectedStillExists =
+      state.selectedEpochId != null &&
+      state.epochs.some((item) => item.id == state.selectedEpochId);
+    if (latestId != null && !selectedStillExists) {
+      state.selectedEpochId = latestId;
+    }
     rebuildDerivedReports(state);
   }
   state.updatedAt = Date.now();
@@ -77,8 +160,13 @@ async function bulkSyncTabState(tabId, { runtime, epochs }) {
 async function pushEpoch(tabId, payload) {
   const state = getTabState(tabId);
   const slim = slimEpochForStorage(payload);
+  const prevLatestId = state.epochs[0]?.id ?? null;
+  const wasFollowingLatest =
+    state.selectedEpochId == null || state.selectedEpochId == prevLatestId;
   state.epochs = [slim, ...state.epochs.filter((item) => item.id !== slim.id)].slice(0, MAX_EPOCHS);
-  state.selectedEpochId = slim.id;
+  if (wasFollowingLatest) {
+    state.selectedEpochId = slim.id;
+  }
   state.cutoverReport = accumulateCutoverReport(state.cutoverReport, slim);
   state.scenarioReport = accumulateScenarioReport(state.scenarioReport, slim);
   state.updatedAt = Date.now();
@@ -133,27 +221,42 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   tabStore.delete(tabId);
 });
 
+function notifyPanelStateUpdated(tabId) {
+  if (tabId == null) {
+    return;
+  }
+  try {
+    chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId }).catch(() => {});
+  } catch {
+    // DevTools panel 未打开或 port 已断开 — 静默忽略
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id ?? message.tabId;
 
   const run = async () => {
     if (message.type === 'SS_EPOCH' && sender.tab?.id != null) {
       await pushEpoch(sender.tab.id, message.payload);
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: sender.tab.id }).catch(() => {});
+      notifyPanelStateUpdated(sender.tab.id);
       return { ok: true };
     }
 
     if (message.type === 'SS_RUNTIME' && sender.tab?.id != null) {
       const state = getTabState(sender.tab.id);
       state.runtime = message.payload;
+      ensureScenarioCatalog(state, message.payload?.meta?.boName);
       state.updatedAt = Date.now();
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: sender.tab.id }).catch(() => {});
+      notifyPanelStateUpdated(sender.tab.id);
       return { ok: true };
     }
 
     if (message.type === 'SS_GET_STATE') {
       const targetTabId = message.tabId;
       const state = targetTabId != null ? getTabState(targetTabId) : emptyTabState();
+      if (targetTabId != null) {
+        ensureScenarioCatalog(state, state.runtime?.meta?.boName);
+      }
       const issues = await listIssues();
       const settings = await getSettingsForPanel();
       return {
@@ -176,7 +279,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         runtime: message.runtime,
         epochs: message.epochs
       });
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return {
         ok: true,
         epochCount: state.epochs.length,
@@ -186,7 +289,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.type === 'SS_SELECT_EPOCH') {
       const state = getTabState(message.tabId);
-      if (state.epochs.some((item) => item.id === message.epochId)) {
+      if (state.epochs.some((item) => item.id == message.epochId)) {
         state.selectedEpochId = message.epochId;
       }
       return { ok: true, selectedEpochId: state.selectedEpochId };
@@ -196,16 +299,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const state = getTabState(message.tabId);
       state.cutoverReport = emptyCutoverReport();
       state.updatedAt = Date.now();
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return { ok: true };
     }
 
     if (message.type === 'SS_RESET_SCENARIO_REPORT') {
       const state = getTabState(message.tabId);
-      state.scenarioReport = resetScenarioReport();
+      state.scenarioReport = resetScenarioReport(state.scenarioReport, state.scenarioCatalogPack);
       state.updatedAt = Date.now();
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return { ok: true };
+    }
+
+    if (message.type === 'SS_BOOTSTRAP_SCENARIO_CATALOG') {
+      const state = getTabState(message.tabId);
+      const result = ensureScenarioCatalog(state, message.boName, { force: !!message.force });
+      if (result.applied) {
+        notifyPanelStateUpdated(message.tabId);
+      }
+      return result;
+    }
+
+    if (message.type === 'SS_APPLY_SCENARIO_CATALOG') {
+      const state = getTabState(message.tabId);
+      const pack = normalizeScenarioPack(message.catalog);
+      if (!pack) {
+        return { ok: false, error: '无效场景 catalog（需含 scenarios；支持领域 SSOT 或工具 L3）' };
+      }
+      state.scenarioCatalogPack = pack;
+      state.scenarioReport = emptyScenarioReport(pack);
+      state.updatedAt = Date.now();
+      notifyPanelStateUpdated(message.tabId);
+      return {
+        ok: true,
+        boName: pack.boName,
+        version: pack.version,
+        scenarioCount: pack.scenarios.length,
+        catalog: pack,
+        scenarioReport: state.scenarioReport
+      };
     }
 
     if (message.type === 'SS_MARK_SCENARIO') {
@@ -215,7 +347,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return result;
       }
       state.updatedAt = Date.now();
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return result;
     }
 
@@ -244,25 +376,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.autoSyncJira) {
         await syncIssuesBatch([issue.fingerprint]);
       }
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return { ok: true, issue };
     }
 
     if (message.type === 'SS_UPDATE_ISSUE') {
       const issue = await updateIssue(message.fingerprint, message.patch || {});
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return { ok: !!issue, issue };
     }
 
     if (message.type === 'SS_DELETE_ISSUE') {
       const ok = await deleteIssue(message.fingerprint);
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return { ok };
     }
 
     if (message.type === 'SS_BATCH_SYNC_JIRA') {
       const result = await syncIssuesBatch(message.fingerprints || []);
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return result;
     }
 
@@ -272,7 +404,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.type === 'SS_SAVE_SETTINGS') {
       const settings = await saveSettings(message.settings || {});
-      chrome.runtime.sendMessage({ type: 'SS_STATE_UPDATED', tabId: message.tabId }).catch(() => {});
+      notifyPanelStateUpdated(message.tabId);
       return { ok: true, settings: await getSettingsForPanel() };
     }
 

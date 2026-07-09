@@ -1,24 +1,22 @@
-import { getScenarioLabel, MIGRATION_SCENARIO_TAGS } from '../shared/scenario-catalog.js';
+import {
+  filterRowsByWatchFields,
+  findScenarioMeta,
+  getMigrationScenarioTags,
+  getScenarioLabel,
+  normalizeScenarioPack,
+  watchFieldToFieldId
+} from '../shared/scenario-catalog.js';
 
-export function emptyScenarioReport() {
-  const scenarios = {};
-  for (const tag of MIGRATION_SCENARIO_TAGS) {
-    scenarios[tag] = createScenarioRecord(tag);
-  }
+function createScenarioRecord(meta) {
   return {
-    boName: null,
-    allowlistVersion: null,
-    hasNewChainObserved: false,
-    updatedAt: 0,
-    summary: recomputeSummary(scenarios),
-    scenarios
-  };
-}
-
-function createScenarioRecord(tag) {
-  return {
-    tag,
-    label: getScenarioLabel(tag),
+    tag: meta.tag,
+    order: meta.order ?? 0,
+    label: meta.label || getScenarioLabel(meta.tag),
+    group: meta.group || '',
+    checkpoint: meta.checkpoint || '',
+    signOffMode: meta.signOffMode === 'manual' ? 'manual' : 'allowlist',
+    watchFields: Array.isArray(meta.watchFields) ? meta.watchFields : [],
+    steps: Array.isArray(meta.steps) ? meta.steps : [],
     status: 'not_started',
     markedComplete: false,
     markedCompleteAt: null,
@@ -30,6 +28,42 @@ function createScenarioRecord(tag) {
     unobservedFields: 0,
     fields: []
   };
+}
+
+export function emptyScenarioReport(catalogPack) {
+  const normalized = catalogPack ? normalizeScenarioPack(catalogPack) : null;
+  // 无 catalog 时返回空报告，禁止用 LEGACY 9 项冒充领域验证清单
+  const catalogList = normalized?.scenarios?.length ? normalized.scenarios : [];
+  const scenarios = {};
+  for (const meta of catalogList) {
+    scenarios[meta.tag] = createScenarioRecord(meta);
+  }
+  for (const meta of catalogList) {
+    const record = scenarios[meta.tag];
+    seedWatchFieldRecords(record);
+    record.allowlistFieldCount = getTargetFieldCount(record) || record.fields.length;
+    record.unobservedFields = Math.max(0, record.allowlistFieldCount - record.readyFields);
+  }
+  return {
+    boName: normalized?.boName || null,
+    catalogVersion: normalized?.version || null,
+    catalogTitle: normalized?.title || null,
+    allowlistVersion: normalized?.allowlistVersion || null,
+    hasNewChainObserved: false,
+    updatedAt: 0,
+    summary: recomputeSummary(scenarios),
+    scenarios
+  };
+}
+
+function getTargetFieldCount(record) {
+  if (record.signOffMode === 'manual') {
+    return 0;
+  }
+  if (record.watchFields?.length) {
+    return record.watchFields.length;
+  }
+  return 0;
 }
 
 function fieldRecordFromRow(row) {
@@ -45,6 +79,31 @@ function fieldRecordFromRow(row) {
     scenarioReady: false,
     blockReason: '尚未观测'
   };
+}
+
+function seedWatchFieldRecords(record) {
+  if (!record.watchFields?.length) {
+    return;
+  }
+  const map = new Map(record.fields.map((item) => [item.fieldId, item]));
+  for (const watch of record.watchFields) {
+    const fieldId = watchFieldToFieldId(watch);
+    if (!map.has(fieldId)) {
+      map.set(fieldId, {
+        fieldId,
+        path: watch.path,
+        stateType: watch.stateType || 'disabled',
+        configKey: '',
+        epochCount: 0,
+        logicMismatchCount: 0,
+        lastSeverity: 'unobserved',
+        lastEpochId: null,
+        scenarioReady: false,
+        blockReason: '尚未观测'
+      });
+    }
+  }
+  record.fields = [...map.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function recomputeFieldReady(record, hasNewChainObserved) {
@@ -68,6 +127,15 @@ function recomputeFieldReady(record, hasNewChainObserved) {
 }
 
 function recomputeScenarioStatus(record, hasNewChainObserved) {
+  if (record.signOffMode === 'manual') {
+    if (record.epochCount === 0 && !record.markedComplete) {
+      record.status = 'not_started';
+      return;
+    }
+    record.status = record.markedComplete ? 'pass' : 'in_progress';
+    return;
+  }
+
   if (record.epochCount === 0) {
     record.status = 'not_started';
     record.markedComplete = false;
@@ -87,7 +155,13 @@ function recomputeScenarioStatus(record, hasNewChainObserved) {
     return;
   }
 
-  if (record.allowlistFieldCount > 0 && record.readyFields === record.allowlistFieldCount) {
+  const target = getTargetFieldCount(record);
+  if (target > 0 && record.readyFields === target) {
+    record.status = 'pass';
+    return;
+  }
+
+  if (!record.watchFields?.length && record.readyFields > 0 && record.blockedFields === 0) {
     record.status = 'pass';
     return;
   }
@@ -136,9 +210,13 @@ export function accumulateScenarioReport(report, epoch) {
 
   const record = report.scenarios[tag];
   record.epochCount += 1;
+  seedWatchFieldRecords(record);
+
+  const relevantRows = filterRowsByWatchFields(epoch.allowlistFieldResults || [], record.watchFields);
+  const rowsToProcess = record.watchFields?.length ? relevantRows : epoch.allowlistFieldResults || [];
   const fieldMap = new Map(record.fields.map((item) => [item.fieldId, item]));
 
-  for (const row of epoch.allowlistFieldResults || []) {
+  for (const row of rowsToProcess) {
     if (!fieldMap.has(row.fieldId)) {
       fieldMap.set(row.fieldId, fieldRecordFromRow(row));
     }
@@ -157,10 +235,10 @@ export function accumulateScenarioReport(report, epoch) {
   }
 
   record.fields = [...fieldMap.values()].sort((a, b) => a.path.localeCompare(b.path));
-  record.allowlistFieldCount = record.fields.length;
+  record.allowlistFieldCount = getTargetFieldCount(record) || record.fields.length;
   record.readyFields = record.fields.filter((item) => item.scenarioReady).length;
   record.blockedFields = record.fields.filter((item) => item.logicMismatchCount > 0).length;
-  record.unobservedFields = record.fields.filter((item) => item.epochCount === 0).length;
+  record.unobservedFields = Math.max(0, record.allowlistFieldCount - record.readyFields);
 
   recomputeScenarioStatus(record, report.hasNewChainObserved);
   report.updatedAt = Date.now();
@@ -173,18 +251,41 @@ export function markScenarioComplete(report, scenarioTag, complete = true) {
   if (!record) {
     return { ok: false, error: '未知场景' };
   }
-  if (complete && record.status !== 'pass') {
-    return { ok: false, error: '仅 PASS 场景可 Mark Complete' };
+  if (complete && record.signOffMode !== 'manual' && record.status !== 'pass') {
+    return { ok: false, error: '仅 PASS 场景可 Mark Complete（manual 场景可直接签字）' };
   }
   record.markedComplete = !!complete;
   record.markedCompleteAt = complete ? Date.now() : null;
+  if (record.signOffMode === 'manual' && complete) {
+    record.status = 'pass';
+  }
   report.summary = recomputeSummary(report.scenarios);
   report.updatedAt = Date.now();
-  return { ok: true, record };
+  return { ok: true, record, summary: report.summary };
 }
 
-export function resetScenarioReport(report) {
-  return emptyScenarioReport();
+export function resetScenarioReport(report, catalogPack) {
+  if (catalogPack) {
+    return emptyScenarioReport(catalogPack);
+  }
+  return emptyScenarioReport(
+    report?.catalogVersion ?
+      {
+        boName: report.boName,
+        version: report.catalogVersion,
+        title: report.catalogTitle,
+        scenarios: Object.values(report.scenarios || {}).map((item) => ({
+          tag: item.tag,
+          label: item.label,
+          group: item.group,
+          checkpoint: item.checkpoint,
+          signOffMode: item.signOffMode,
+          watchFields: item.watchFields,
+          steps: item.steps
+        }))
+      }
+    : null
+  );
 }
 
 export function getScenarioVerdict(report, activeTag) {
@@ -211,7 +312,10 @@ export function getScenarioVerdict(report, activeTag) {
       return {
         status: 'ok',
         headline: `本场景 PASS · ${active.label}`,
-        subline: `${active.readyFields}/${active.allowlistFieldCount} allowlist 字段就绪`
+        subline:
+          active.signOffMode === 'manual' ?
+            'manual 场景已签字'
+          : `${active.readyFields}/${active.allowlistFieldCount} watch 字段就绪`
       };
     }
     if (active.status === 'block') {
@@ -250,6 +354,8 @@ export function exportScenarioReportJson(report, runtime) {
     {
       exportedAt: new Date().toISOString(),
       boName: report.boName,
+      catalogVersion: report.catalogVersion,
+      catalogTitle: report.catalogTitle,
       allowlistVersion: report.allowlistVersion,
       hasNewChainObserved: report.hasNewChainObserved,
       runtime: runtime || {},
@@ -265,7 +371,9 @@ export function exportScenarioReportCsv(report) {
   const header = [
     'scenarioTag',
     'label',
+    'group',
     'status',
+    'signOffMode',
     'markedComplete',
     'epochCount',
     'logicMismatchCount',
@@ -277,7 +385,9 @@ export function exportScenarioReportCsv(report) {
     [
       item.tag,
       item.label,
+      item.group,
       item.status,
+      item.signOffMode,
       item.markedComplete ? 'true' : 'false',
       item.epochCount,
       item.logicMismatchCount,
@@ -290,3 +400,5 @@ export function exportScenarioReportCsv(report) {
   );
   return [header.join(','), ...rows].join('\n');
 }
+
+export { getMigrationScenarioTags, findScenarioMeta };

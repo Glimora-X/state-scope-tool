@@ -40,3 +40,15 @@ export function isVerboseMode() {
     return false;
   }
 }
+
+/** 默认静默；epoch / 激活日志需 stateScopeConsole=true 或 stateScopeDebug=true */
+export function isConsoleOutputEnabled() {
+  try {
+    return (
+      localStorage.getItem('stateScopeConsole') === 'true' ||
+      localStorage.getItem('stateScopeDebug') === 'true'
+    );
+  } catch {
+    return false;
+  }
+}

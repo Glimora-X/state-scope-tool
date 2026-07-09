@@ -1,16 +1,40 @@
 /* global chrome */
 window.StateScopeScenarioUI = (function createScenarioUI() {
-  const CHECKLIST = [
-    { tag: 'new', label: '新增', checkpoint: '表头 + 明细初始态' },
-    { tag: 'edit', label: '编辑', checkpoint: '表头 + 明细初始态' },
-    { tag: 'view', label: '查看', checkpoint: '表头 + 明细初始态' },
-    { tag: 'copy-new', label: '复制新增', checkpoint: '表头 + 明细初始态' },
-    { tag: 'audit-edit', label: '审核中修改', checkpoint: 'Scenario 规则' },
-    { tag: 'detail-row-crud', label: '子表增删复制行', checkpoint: 'uuid 下行状态不串' },
-    { tag: 'header-linkage', label: '表头改联动字段', checkpoint: '仅受影响字段变化' },
-    { tag: 'nested-detail', label: '孙表嵌套', checkpoint: '路径完整' },
-    { tag: 'data-grid-edit', label: 'data-grid-edit', checkpoint: '列表/选择态与状态分离' }
+  const LEGACY_CHECKLIST = [
+    { tag: 'new', label: '新增', checkpoint: '表头 + 明细初始态', order: 0, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'edit', label: '编辑', checkpoint: '表头 + 明细初始态', order: 1, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'view', label: '查看', checkpoint: '表头 + 明细初始态', order: 2, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'copy-new', label: '复制新增', checkpoint: '表头 + 明细初始态', order: 3, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'audit-edit', label: '审核中修改', checkpoint: 'Scenario 规则', order: 4, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'detail-row-crud', label: '子表增删复制行', checkpoint: 'uuid 下行状态不串', order: 5, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'header-linkage', label: '表头改联动字段', checkpoint: '仅受影响字段变化', order: 6, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'nested-detail', label: '孙表嵌套', checkpoint: '路径完整', order: 7, group: '', signOffMode: 'allowlist', steps: [] },
+    { tag: 'data-grid-edit', label: 'data-grid-edit', checkpoint: '列表/选择态与状态分离', order: 8, group: '', signOffMode: 'allowlist', steps: [] }
   ];
+
+  function resolveChecklist(ctx) {
+    const report = getReport(ctx);
+    const scenarios = report?.scenarios;
+    if (scenarios && Object.keys(scenarios).length) {
+      return Object.values(scenarios)
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+        .map((record) => ({
+          tag: record.tag,
+          order: record.order ?? 0,
+          group: record.group || '',
+          label: record.label || record.tag,
+          checkpoint: record.checkpoint || '',
+          signOffMode: record.signOffMode || 'allowlist',
+          steps: record.steps || []
+        }));
+    }
+    // 无上传/无内置包时返回空清单，禁止用 LEGACY 9 项冒充领域验证
+    return [];
+  }
+
+  function findChecklistItem(ctx, tag) {
+    return resolveChecklist(ctx).find((item) => item.tag === tag) || null;
+  }
 
   function statusChip(status) {
     if (status === 'pass') {
@@ -27,17 +51,39 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       not_started: '未开始',
       in_progress: '进行中',
       pass: 'PASS',
-      block: 'BLOCK'
+      block: 'BLOCK',
+      signed: '已签字'
     };
     return map[status] || status;
   }
 
+  function resolveRecordStatus(record) {
+    if (record?.markedComplete) {
+      return { chip: 'on', label: '已签字' };
+    }
+    return { chip: statusChip(record?.status), label: statusLabel(record?.status || 'not_started') };
+  }
+
   function getReport(ctx) {
+    if (typeof ctx.getScenarioReport === 'function') {
+      return ctx.getScenarioReport();
+    }
     return ctx.appState?.scenarioReport || null;
   }
 
+  function isCatalogReady(ctx, report) {
+    if (typeof ctx.isL3ScenarioReady === 'function' && ctx.isL3ScenarioReady(report)) {
+      return true;
+    }
+    if (report?.catalogVersion === '2026-06-29-l3-v1' && Object.keys(report?.scenarios || {}).length >= 15) {
+      return true;
+    }
+    return !!(report?.boName && report?.catalogVersion && Object.keys(report?.scenarios || {}).length >= 1);
+  }
+
   function getSelectedScenario(ctx) {
-    return ctx.ui.selectedScenarioTag || ctx.ui.scenarioTag || CHECKLIST[0].tag;
+    const checklist = resolveChecklist(ctx);
+    return ctx.ui.selectedScenarioTag || ctx.ui.scenarioTag || checklist[0]?.tag || '';
   }
 
   function renderVerdict(ctx) {
@@ -47,7 +93,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       return ctx.renderVerdict({
         status: 'idle',
         headline: '场景回归未开始',
-        subline: '选择场景并操作单据'
+        subline: '加载 L3 场景清单并操作单据'
       });
     }
 
@@ -61,10 +107,14 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       });
     }
     if (activeRecord?.status === 'pass') {
+      const subline =
+        activeRecord.signOffMode === 'manual' ?
+          'manual 场景已 PASS'
+        : `${activeRecord.readyFields}/${activeRecord.allowlistFieldCount} watch 字段就绪`;
       return ctx.renderVerdict({
         status: 'ok',
         headline: `PASS · ${activeRecord.label}`,
-        subline: `${activeRecord.readyFields}/${activeRecord.allowlistFieldCount} allowlist 字段就绪`
+        subline
       });
     }
     if (summary.block > 0) {
@@ -84,36 +134,91 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
   function renderChecklist(ctx) {
     const report = getReport(ctx);
     const selected = getSelectedScenario(ctx);
-    return `<div class="scenario-checklist">${CHECKLIST.map((item) => {
-      const record = report?.scenarios?.[item.tag] || { status: 'not_started', markedComplete: false, epochCount: 0 };
-      const active = selected === item.tag ? ' active' : '';
-      const completeMark = record.markedComplete ? ' ✓签字' : '';
-      return `<button type="button" class="scenario-item${active}" data-select-scenario="${item.tag}">
+    const checklist = resolveChecklist(ctx);
+    let lastGroup = null;
+    const items = checklist
+      .map((item) => {
+        const record = report?.scenarios?.[item.tag] || {
+          status: 'not_started',
+          markedComplete: false,
+          epochCount: 0
+        };
+        const active = selected === item.tag ? ' active' : '';
+        const completeMark = record.markedComplete ? ' ✓签字' : '';
+        const displayStatus = resolveRecordStatus(record);
+        const groupHeader =
+          item.group && item.group !== lastGroup ?
+            ((lastGroup = item.group), `<div class="scenario-group-head">${ctx.esc(item.group)}</div>`)
+          : '';
+        return `${groupHeader}<button type="button" class="scenario-item${active}" data-select-scenario="${item.tag}">
         <div class="scenario-item-head">
-          <span class="chip ${statusChip(record.status)}">${statusLabel(record.status)}</span>
+          <span class="chip ${displayStatus.chip}">${displayStatus.label}</span>
           <strong>${ctx.esc(item.label)}</strong>
+          ${item.signOffMode === 'manual' ? '<span class="chip">manual</span>' : ''}
           ${completeMark ? `<span class="subtle">${completeMark}</span>` : ''}
         </div>
         <div class="subtle">${ctx.esc(item.checkpoint)}</div>
         <div class="subtle">Epoch ${record.epochCount || 0}${record.logicMismatchCount ? ` · mismatch ${record.logicMismatchCount}` : ''}</div>
       </button>`;
-    }).join('')}</div>`;
+      })
+      .join('');
+    return `<div class="scenario-checklist">${items}</div>`;
+  }
+
+  function renderSteps(ctx, record, meta) {
+    const steps = record?.steps?.length ? record.steps : meta?.steps || [];
+    if (!steps.length) {
+      return '';
+    }
+    const rows = steps
+      .map(
+        (step) => `<tr>
+          <td><code>${ctx.esc(step.id || '—')}</code></td>
+          <td>${ctx.esc(step.action || '')}</td>
+          <td>${ctx.esc(step.expect || '')}</td>
+        </tr>`
+      )
+      .join('');
+    return `<div class="cutover-table-wrap scenario-steps">
+      <div class="card-head">操作步骤（${steps.length}）</div>
+      <table class="cutover-table">
+        <thead><tr><th>ID</th><th>操作</th><th>预期</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
   }
 
   function renderScenarioDetail(ctx) {
     const report = getReport(ctx);
     const tag = getSelectedScenario(ctx);
     const record = report?.scenarios?.[tag];
-    const meta = CHECKLIST.find((item) => item.tag === tag);
+    const meta = findChecklistItem(ctx, tag);
 
     if (!record) {
       return '<div class="empty">选择左侧场景</div>';
     }
 
-    const canMark = record.markedComplete || record.status === 'pass';
-    const fields =
-      record.fields?.length ?
+    const canMark = record.markedComplete || record.status === 'pass' || record.signOffMode === 'manual';
+    const markLabel =
+      record.markedComplete ?
+        '取消签字'
+      : record.signOffMode === 'manual' ?
+        'Mark Complete（manual 可直接签）'
+      : 'Mark Complete（PASS 可签）';
+    const fieldRows = record.fields?.length ?
         record.fields
+      : (record.watchFields || []).map((watch) => ({
+          path: watch.path,
+          stateType: watch.stateType || 'disabled',
+          epochCount: 0,
+          logicMismatchCount: 0,
+          scenarioReady: false,
+          blockReason: '尚未观测'
+        }));
+
+    const fields =
+      fieldRows.length ?
+        fieldRows
           .map(
             (field) => `<tr class="${field.logicMismatchCount > 0 ? 'row-bad' : field.scenarioReady ? 'row-ok' : ''}">
           <td><div class="field-name">${ctx.esc(field.path)}</div><div class="field-path">${ctx.esc(field.stateType)}</div></td>
@@ -123,13 +228,15 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         </tr>`
           )
           .join('')
-      : `<tr><td colspan="4" class="empty">本场景尚无 allowlist 字段观测。请加载 allowlist 并在该场景下操作单据。</td></tr>`;
+      : record.signOffMode === 'manual' ?
+        `<tr><td colspan="4" class="empty">manual 场景无 watch 字段累计；完成步骤后可直接 Mark Complete。</td></tr>`
+      : `<tr><td colspan="4" class="empty">本场景未配置 watch 字段。请确认已上传领域 SSOT 且场景含 assertFields / compareFields。</td></tr>`;
 
     return `<div>
       <div class="detail-head">
         <div>
-          <div class="detail-title">${ctx.esc(meta?.label || tag)}</div>
-          <div class="subtle">${ctx.esc(meta?.checkpoint || '')}</div>
+          <div class="detail-title">${ctx.esc(meta?.label || record.label || tag)}</div>
+          <div class="subtle">${ctx.esc(meta?.checkpoint || record.checkpoint || '')}</div>
         </div>
         <span class="chip ${statusChip(record.status)}">${statusLabel(record.status)}</span>
       </div>
@@ -138,8 +245,9 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         <div class="kpi"><div class="kpi-label">READY</div><div class="kpi-value">${record.readyFields}/${record.allowlistFieldCount}</div></div>
         <div class="kpi"><div class="kpi-label">Mismatch</div><div class="kpi-value">${record.logicMismatchCount}</div></div>
       </div>
+      ${renderSteps(ctx, record, meta)}
       <div class="toolbar">
-        <button type="button" class="btn primary" id="mark-scenario-complete" ${canMark ? '' : 'disabled'}>${record.markedComplete ? '取消签字' : 'Mark Complete（PASS 可签）'}</button>
+        <button type="button" class="btn primary" id="mark-scenario-complete" ${canMark ? '' : 'disabled'}>${markLabel}</button>
         <button type="button" class="btn" id="use-as-active-scenario">设为当前测试场景</button>
       </div>
       <div class="cutover-table-wrap">
@@ -153,38 +261,67 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
 
   function renderScenarioBar(ctx) {
     const tag = ctx.ui.scenarioTag || '';
-    const options = CHECKLIST.map(
-      (item) => `<option value="${item.tag}" ${tag === item.tag ? 'selected' : ''}>${item.label}</option>`
-    ).join('');
+    const checklist = resolveChecklist(ctx);
+    const options = checklist
+      .map((item) => `<option value="${item.tag}" ${tag === item.tag ? 'selected' : ''}>${ctx.esc(item.label)}</option>`)
+      .join('');
+    const activeLabel = checklist.find((i) => i.tag === tag)?.label || tag;
+    const viewing = getSelectedScenario(ctx);
+    const viewingLabel = findChecklistItem(ctx, viewing)?.label || viewing;
+    const tagMismatch = viewing && tag && viewing !== tag;
     return `<div class="scenario-bar">
       <label>当前测试场景
         <select id="scenario-select"><option value="">— 选择 —</option>${options}</select>
       </label>
-      <span class="subtle">${tag ? `Epoch 将计入「${CHECKLIST.find((i) => i.tag === tag)?.label || tag}」` : '未选场景时 Epoch 不计入场景回归'}</span>
+      <span class="subtle">${tag ? `Epoch 将计入「${ctx.esc(activeLabel)}」` : '未选场景时 Epoch 不计入场景回归'}</span>
+      ${tagMismatch ? `<span class="chip off">左侧查看「${ctx.esc(viewingLabel)}」但未设为当前场景</span>` : ''}
     </div>`;
   }
 
   function renderScenarioTab(ctx) {
     const report = getReport(ctx);
     const summary = report?.summary || {};
+    const checklist = resolveChecklist(ctx);
+    const boName = report?.boName || ctx.ui?.pageSettings?.pageMeta?.boName || '当前 BO';
+    const ready = isCatalogReady(ctx, report);
+    const catalogLine = ready ?
+        `${report.boName || '—'} · ${ctx.esc(report.catalogTitle || '场景包')} · v${ctx.esc(report.catalogVersion)} · ${Object.keys(report.scenarios || {}).length} 项`
+      : `${ctx.esc(boName)} · 未加载场景包 · 请上传领域 SSOT`;
+    const catalogBanner =
+      ready ?
+        ''
+      : `<div class="banner warn">
+        <strong>必须上传领域场景 SSOT</strong>，工具不会为低代码 BO 内置副本（避免领域改文件后工具不同步）。
+        <br/>请导入业务仓 <code>*.scenarios.v1.json</code>（如 <code>outsourceIssue.scenarios.v1.json</code>）。
+        仅销货单 GoodsIssue 仍可点「加载内置场景」。
+      </div>`;
+    const emptyHint =
+      !ready && !checklist.length ?
+        `<div class="empty">尚无场景清单。点下方「上传领域 SSOT」选择业务仓 JSON。</div>`
+      : '';
     return `${renderScenarioBar(ctx)}
+    ${catalogBanner}
     ${renderVerdict(ctx)}
     <div class="scenario-page">
       <div class="card">
-        <div class="card-head">§7.4 场景 Checklist · PASS ${summary.pass || 0}/${summary.total || CHECKLIST.length}</div>
-        ${renderChecklist(ctx)}
+        <div class="card-head">场景 Checklist · PASS ${summary.pass || 0}/${summary.total || checklist.length}</div>
+        <div class="subtle scenario-catalog-meta">${catalogLine}</div>
+        ${emptyHint || renderChecklist(ctx)}
       </div>
       <div class="card">
-        <div class="card-head">场景详情 · 签字 ${summary.markedComplete || 0}/${summary.total || CHECKLIST.length}</div>
-        ${renderScenarioDetail(ctx)}
+        <div class="card-head">场景详情 · 签字 ${summary.markedComplete || 0}/${summary.total || checklist.length}</div>
+        ${ready ? renderScenarioDetail(ctx) : '<div class="empty">上传 SSOT 后显示场景步骤与签字</div>'}
       </div>
     </div>
     <div class="toolbar">
+      <button type="button" class="btn primary" id="import-scenario-catalog-btn">上传领域 SSOT</button>
+      <input type="file" id="import-scenario-catalog" accept=".json,application/json" hidden />
+      <button type="button" class="btn" id="reload-scenario-catalog">加载内置场景（仅 GoodsIssue）</button>
       <button type="button" class="btn" id="export-scenario-json">导出场景报告 JSON</button>
       <button type="button" class="btn" id="export-scenario-csv">导出场景报告 CSV</button>
       <button type="button" class="btn" id="reset-scenario-report">重置场景累计</button>
     </div>
-    <div class="banner info">场景 PASS 条件：new 轨已观测 + allowlist 字段在本场景下均无 logic-mismatch。render-mismatch 待 P2。</div>`;
+    <div class="banner info">领域 SSOT 直接可用（id/setup/assertFields）。PASS：shadow/new 轨已观测 + watch 字段无 logic-mismatch。</div>`;
   }
 
   async function writeScenarioToPage(ctx, tag) {
@@ -203,13 +340,19 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       ctx.ui.selectedScenarioTag = event.target.value || ctx.ui.selectedScenarioTag;
       ctx.renderApp();
       ctx.bindAppEvents();
+      await ctx.refresh?.({ force: true });
     });
 
     document.querySelectorAll('[data-select-scenario]').forEach((el) => {
-      el.addEventListener('click', () => {
-        ctx.ui.selectedScenarioTag = el.getAttribute('data-select-scenario');
+      el.addEventListener('click', async () => {
+        const tag = el.getAttribute('data-select-scenario');
+        ctx.ui.selectedScenarioTag = tag;
+        await writeScenarioToPage(ctx, tag);
         ctx.renderApp();
         ctx.bindAppEvents();
+        const label = findChecklistItem(ctx, tag)?.label || tag;
+        ctx.showToast(`当前场景：${label}`);
+        await ctx.refresh?.({ force: true });
       });
     });
 
@@ -218,7 +361,8 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       await writeScenarioToPage(ctx, tag);
       ctx.renderApp();
       ctx.bindAppEvents();
-      ctx.showToast(`当前场景：${CHECKLIST.find((i) => i.tag === tag)?.label || tag}`);
+      const label = findChecklistItem(ctx, tag)?.label || tag;
+      ctx.showToast(`当前场景：${label}`);
     });
 
     document.getElementById('mark-scenario-complete')?.addEventListener('click', async () => {
@@ -232,10 +376,56 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         complete
       });
       if (response?.ok) {
+        ctx.applyScenarioMarkLocally?.(tag, response.record, response.summary);
         ctx.showToast(complete ? '场景已 Mark Complete' : '已取消签字');
-        await ctx.refresh();
+        await ctx.refresh({ force: true });
       } else {
         ctx.showToast(response?.error || '操作失败');
+      }
+    });
+
+    document.getElementById('reload-scenario-catalog')?.addEventListener('click', async () => {
+      if (!ctx.syncScenarioCatalog) {
+        ctx.showToast('Panel 未接入场景同步');
+        return;
+      }
+      const result = await ctx.syncScenarioCatalog({ force: true });
+      if (result?.ok) {
+        ctx.showToast(`已加载 ${result.scenarioCount || 0} 个场景`);
+      } else if (result?.needsUpload) {
+        ctx.showToast(result.error || '请上传领域 SSOT');
+        document.getElementById('import-scenario-catalog')?.click();
+      } else {
+        ctx.showToast(result?.error || '场景清单加载失败');
+      }
+      await ctx.refresh({ force: true });
+    });
+
+    document.getElementById('import-scenario-catalog-btn')?.addEventListener('click', () => {
+      document.getElementById('import-scenario-catalog')?.click();
+    });
+
+    document.getElementById('import-scenario-catalog')?.addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file || !ctx.syncScenarioCatalog) {
+        return;
+      }
+      try {
+        const catalog = JSON.parse(await file.text());
+        if (!catalog?.scenarios?.length) {
+          ctx.showToast('无效 SSOT：缺少 scenarios 数组');
+          return;
+        }
+        const result = await ctx.syncScenarioCatalog({ force: true, catalog });
+        ctx.showToast(
+          result?.ok ?
+            `已导入 ${result.scenarioCount || catalog.scenarios?.length || 0} 个场景（${catalog.boName || 'SSOT'}）`
+          : result?.error || '导入失败'
+        );
+        await ctx.refresh({ force: true });
+      } catch (error) {
+        ctx.showToast(`JSON 解析失败：${error.message}`);
       }
     });
 
@@ -283,7 +473,8 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
   }
 
   return {
-    CHECKLIST,
+    LEGACY_CHECKLIST,
+    resolveChecklist,
     renderScenarioTab,
     bindScenarioEvents,
     updateNavBadge,

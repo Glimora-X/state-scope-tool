@@ -1,5 +1,7 @@
 const LOG_PREFIX = '[StateScope]';
 
+import { discoverLowcodeCard, discoverLowcodeInterlayer, discoverMdfBizApplication, resolveLowcodeUiRoot } from './wrap-lowcode.js';
+
 export function isBizDebugEnabled() {
   try {
     if (window.bizDebug === true) {
@@ -13,6 +15,13 @@ export function isBizDebugEnabled() {
 
 export function getActivationDiagnostics(context = {}) {
   const bizApplication = context.bizApplication;
+  const profileDetection = context.profileDetection || null;
+  const viewModel = context.viewModel;
+  const card = discoverLowcodeCard(viewModel);
+  const mdfBiz = discoverMdfBizApplication(viewModel);
+  const interlayer = discoverLowcodeInterlayer(viewModel, mdfBiz);
+  const uiRoot = resolveLowcodeUiRoot(viewModel, mdfBiz);
+  const mdfApp = typeof window !== 'undefined' ? window.mdf : null;
   return {
     bizDebug: isBizDebugEnabled(),
     windowBizApplication: !!window.bizApplication,
@@ -20,8 +29,23 @@ export function getActivationDiagnostics(context = {}) {
     presenter: !!context.presenter,
     uiStateController: !!context.uiStateController,
     formController: !!context.formController,
-    lowcodeViewModel: !!context.viewModel,
-    boName: context.boName || bizApplication?.boName || context.presenter?.voucherBoName || ''
+    lowcodeViewModel: !!viewModel,
+    lowcodeCard: !!card,
+    mdfAppManager: !!mdfApp,
+    mdfCur: !!mdfApp?.cur,
+    mdfDoDispatch: typeof mdfBiz?.doDispatch === 'function',
+    mdfBizApplication: !!mdfBiz,
+    mdfInterlayer: !!interlayer,
+    mdfUiRoot: !!uiRoot,
+    mdfSyncChangedFields: typeof interlayer?.syncChangedFields === 'function',
+    mdfGetDisableHook: !!uiRoot?.__stateScopeUiReaderHooked,
+    mdfAfterBizActionHook: !!uiRoot?.__stateScopeAfterBizWrapped,
+    mdfStateManager: !!mdfBiz?.stateManager,
+    mdfStateRecomputeHook: !!mdfBiz?.stateManager?.__stateScopeRecomputeWrapped,
+    mdfApplyStateAfterDataSync: typeof mdfBiz?.applyStateAfterDataSync === 'function',
+    boName: context.boName || bizApplication?.boName || context.presenter?.voucherBoName || '',
+    profile: context.profile || profileDetection?.effectiveProfile || 'unknown',
+    profileDetection
   };
 }
 
@@ -35,7 +59,9 @@ export function canActivate(context = {}) {
     context.uiStateController ||
     context.formController ||
     context.presenter ||
-    context.viewModel
+    context.viewModel ||
+    // 低代码：路由已解析 boName（viewModel 可能尚未挂载）
+    (context.boName && (context.profile === 'lowcode' || context.profileDetection?.effectiveProfile === 'lowcode'))
   );
 }
 
@@ -51,18 +77,19 @@ export function isRuntimeReady(context = {}) {
   }
 
   if (profile === 'lowcode') {
-    return !!context.viewModel;
+    // 路由已识别 boName 时允许先激活 API；hook 等 viewModel 就绪后再装
+    return !!(context.viewModel || context.boName);
   }
 
   return !!context.bizApplication?.stateManager;
 }
 
 function inferProfile(context) {
+  if (context.viewModel || context.profile === 'lowcode') {
+    return 'lowcode';
+  }
   if (context.uiStateController || context.formController || context.presenter) {
     return 'traditional';
-  }
-  if (context.viewModel) {
-    return 'lowcode';
   }
   return 'unknown';
 }

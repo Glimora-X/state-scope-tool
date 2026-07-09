@@ -4,9 +4,14 @@
 
 仓库：[github.com/Glimora-X/state-scope-tool](https://github.com/Glimora-X/state-scope-tool)
 
-- **不绑定单据**：运行时通过 `window.bizApplication.boName` 识别当前 BO
-- **Profile 分线**：`traditional`（StateCollector）/ `lowcode`（getDisable），默认 `auto`
-- **零生产影响**：仅 `bizDebug=true` 且存在 `bizApplication.stateManager` 时激活
+- **不绑定单据**：运行时通过 `boName` / 路由识别当前 BO
+- **两条迁移线严格分装**（落地代码不同 → hook / Diff / 场景包都不同）：
+  | Profile | 适用 | 旧轨（用户所见） | 新轨（shadow） | Epoch 边界 |
+  |--------|------|------------------|----------------|------------|
+  | `traditional` | 销货单等系统单据 | StateCollector / FormController | `statePatches` 返回值 | `refreshView` |
+  | `lowcode` | 委外发料等 MDF 单据 | `getDisable` / `model.get('disabled')` 终值 | `rootViewModel.shadowStore` | `BizApplication.doDispatch` |
+- **默认 `auto`**：按 boName 映射 + 运行时信号选择；Panel 设置 Tab 可强制
+- **零生产影响**：仅 `bizDebug=true` 时注入
 
 设计文档：`Obsidian Vault/单据知识库/chanjet-mdf-biz-service/StateScope-状态透视工具设计方案.md`
 
@@ -106,10 +111,12 @@ __StateScope__?.rediscover?.()
 
 | 现象 | 原因 |
 |------|------|
-| `stateManager: false` | 销货单未开**升级模式**，`window.bizApplication` 不存在；旧链路仍可通过 FormController 观测 |
-| `formController/uiStateController: false` | 单据页尚未渲染完；刷新扩展后重载页面，或执行 `__StateScope__.rediscover()` |
-| `profile=lowcode` 但实际是销货单 | 旧版误判；v0.1.2+ 已优先 traditional，请刷新扩展 |
-| 有 active 但无 diff | 新规则未注册时仅有 old 轨；操作改字段触发 `refreshView` 后才会出 epoch |
+| `stateManager: false`（traditional） | 销货单未开**升级模式**；旧链路仍可通过 FormController 观测 |
+| `formController/uiStateController: false`（traditional） | 单据页尚未渲染完；刷新扩展后重载页面，或 `__StateScope__.rediscover()` |
+| `lowcodeViewModel: false`（lowcode） | MDF viewModel 未挂到 Fiber/state；等渲染完或 F5 |
+| `profile` 串线 | 设置 `stateScopeProfile=traditional\|lowcode` 强制分线；勿用销货单话术验委外发料 |
+| 有 active 但无 Epoch（traditional） | 改字段触发 `refreshView` 后才会出 epoch |
+| 有 active 但无 Epoch（lowcode） | 改字段触发 `doDispatch` 后才会出 epoch；确认 `doDispatch` hook 已挂 |
 
 **升级模式（新链路 statePatches 必需）：**
 
@@ -146,11 +153,13 @@ location.reload();
 
 ### 场景回归（P1.5）
 
-1. **场景回归 Tab** 左侧为 §7.4 checklist（9 项），右侧为场景详情
-2. 顶部选择 **当前测试场景**，Epoch 的 allowlist 结果计入该场景
-3. 场景 **PASS**：new 轨已观测 + 本场景 allowlist 字段均无 logic-mismatch
-4. PASS 后可 **Mark Complete** 签字；导出 **场景报告 JSON/CSV** 供 QA 归档
-5. **切流报告** = 全局字段累计；**场景回归** = 按场景维度累计（迁移签字用）
+1. **场景清单来源**
+   - **GoodsIssue（传统试点）**：扩展内置 `scenarios/GoodsIssue.L3.v1.json`
+   - **其它 BO（含低代码 OutsourceIssue）**：**必须上传**业务仓领域 SSOT（如 `outsourceIssue.scenarios.v1.json`），工具**不内置副本**
+2. Panel → **场景回归** → **上传领域 SSOT**；支持领域 schema（`id/setup/actions/assertFields`）
+3. 顶部选择 **当前测试场景**，Epoch 计入该场景
+4. 场景 **PASS**：shadow/new 轨已观测 + watch 字段无 logic-mismatch
+5. PASS 后可 **Mark Complete**；导出场景报告 JSON/CSV
 
 ```javascript
 __StateScope__.setScenarioTag('audit-edit')
@@ -178,7 +187,8 @@ __StateScope__.dumpLastEpoch()       // JSON 字符串，可复制给我
 | Wrap `dispatchAction` → `statePatches` | ✅ |
 | Wrap `computeInitialStates` | ✅（若 stateManager 暴露该方法） |
 | Wrap `UiStateController` 旧链路 | ✅（自动发现） |
-| Wrap `getDisable`（lowcode） | ✅（自动发现 viewModel） |
+| Wrap `getDisable` + `applyStatePatches(shadow)`（lowcode） | ✅ 骨架（shadow 依赖 M-MDF-1～3） |
+| Panel Profile 切换（auto/traditional/lowcode） | ✅ v0.6.0 |
 | DevTools Panel（概览/时间线/Diff 壳） | ✅ P0.6 |
 | DevTools Panel 双轨 diff 验收 | ✅ P1（需升级模式） |
 | 切流报告（allowlist 累计 + JSON/CSV） | ✅ P1 |

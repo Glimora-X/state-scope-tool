@@ -1,0 +1,73 @@
+<h2>StateScope Cockpit</h2>
+<p class="subtitle">最后一块设计合同：深色专业台的视觉系统和交互准则。目标是像工程调试台，不是科幻面板。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">Visual System</div>
+    <div class="mockup-body" style="background:#0f1722;color:#dbe7f3;padding:18px;min-height:420px">
+      <div style="font-size:11px;color:#87a0b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Palette and Surfaces</div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:14px">
+        <div style="background:#0b111a;border:1px solid #223244;border-radius:10px;padding:10px"><div style="font-size:11px;color:#87a0b8">Canvas</div><div style="margin-top:8px;font-weight:700">#0B111A</div></div>
+        <div style="background:#101925;border:1px solid #223244;border-radius:10px;padding:10px"><div style="font-size:11px;color:#87a0b8">Panel</div><div style="margin-top:8px;font-weight:700">#101925</div></div>
+        <div style="background:#142234;border:1px solid #2a4967;border-radius:10px;padding:10px"><div style="font-size:11px;color:#8fb0cc">Focus</div><div style="margin-top:8px;font-weight:700">#142234</div></div>
+        <div style="background:#13261a;border:1px solid #275138;border-radius:10px;padding:10px"><div style="font-size:11px;color:#9ed9af">Ready</div><div style="margin-top:8px;font-weight:700">#13261A</div></div>
+        <div style="background:#2a1216;border:1px solid #5a232b;border-radius:10px;padding:10px"><div style="font-size:11px;color:#f0b4bd">Risk</div><div style="margin-top:8px;font-weight:700">#2A1216</div></div>
+      </div>
+
+      <div style="font-size:11px;color:#87a0b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Type Hierarchy</div>
+      <div style="background:#101925;border:1px solid #223244;border-radius:12px;padding:12px;margin-bottom:14px">
+        <div style="font-size:24px;font-weight:700;line-height:1.15">OutsourceIssue</div>
+        <div style="font-size:17px;font-weight:700;margin-top:10px">Session Readiness</div>
+        <div style="font-size:13px;color:#dbe7f3;margin-top:10px">Current epoch captured after doDispatch, 2 risk items need review.</div>
+        <div style="font-size:12px;color:#9fb3c8;margin-top:10px">Secondary explanation uses muted ink, not low-contrast gray.</div>
+        <div style="font-size:11px;color:#87a0b8;letter-spacing:.08em;text-transform:uppercase;margin-top:10px">Section label</div>
+      </div>
+
+      <div style="font-size:11px;color:#87a0b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">State Semantics</div>
+      <div style="display:grid;gap:8px">
+        <div style="padding:10px;border-radius:10px;background:#13261a;border:1px solid #275138;color:#8de2a8">Ready / attached / enabled</div>
+        <div style="padding:10px;border-radius:10px;background:#291b08;border:1px solid #5b4017;color:#f8c56d">Needs verification / mapping unclear / waiting</div>
+        <div style="padding:10px;border-radius:10px;background:#2a1216;border:1px solid #5a232b;color:#ffb7c0">Mismatch / failure / blocked</div>
+        <div style="padding:10px;border-radius:10px;background:#10263e;border:1px solid #2b5171;color:#bfe0ff">Navigable workspace / active focus</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">Interaction Rules</div>
+    <div class="mockup-body" style="background:#0f1722;color:#dbe7f3;padding:18px;min-height:420px">
+      <div style="font-size:11px;color:#87a0b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Behavior Changes</div>
+      <div style="display:grid;gap:10px;margin-bottom:14px">
+        <div style="background:#101925;border:1px solid #223244;border-radius:12px;padding:12px">
+          <strong>Identity stays pinned</strong>
+          <div style="margin-top:4px;color:#9fb3c8">BO、profile、confidence、old/shadow、已激活始终固定在概览顶部，不随中间内容丢失。</div>
+        </div>
+        <div style="background:#101925;border:1px solid #223244;border-radius:12px;padding:12px">
+          <strong>Cards summarize, tabs hold depth</strong>
+          <div style="margin-top:4px;color:#9fb3c8">概览只放摘要和跳转，完整字段、表格、筛选、导出仍保存在各自 Tab 内。</div>
+        </div>
+        <div style="background:#101925;border:1px solid #223244;border-radius:12px;padding:12px">
+          <strong>No hidden information</strong>
+          <div style="margin-top:4px;color:#9fb3c8">允许折叠、抽屉、二段展开，但不能把原来能看到的数据变成不可达。</div>
+        </div>
+        <div style="background:#101925;border:1px solid #223244;border-radius:12px;padding:12px">
+          <strong>Risk is actionable</strong>
+          <div style="margin-top:4px;color:#9fb3c8">风险条目不只是提示，必须可一跳进入 Diff、Issue、Scenario 对应工作区。</div>
+        </div>
+      </div>
+
+      <div style="font-size:11px;color:#87a0b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">What We Will Not Do</div>
+      <div style="display:grid;gap:8px">
+        <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">不会把旧信息删掉，只换组织方式。</div>
+        <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">不会做成花哨仪表盘，不加无意义动效。</div>
+        <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">不会把高价值诊断信息埋到二级页面深处。</div>
+        <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">不会用低对比灰字或过度装饰影响可读性。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>这次只确认一个点</h3>
+  <p class="subtitle">是否接受这套视觉和交互准则：深色专业台、强可读性、状态语义清晰、信息只重组不丢失？</p>
+</div>

@@ -1,0 +1,118 @@
+<h2>StateScope Cockpit</h2>
+<p class="subtitle">方向已锁：深色专业台、保留 7 个 Tab、不丢任何信息。下面这张只定义新的概览页，不代表其它 Tab 被删掉。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Overview Tab · Start-Gated Cockpit</div>
+  <div class="mockup-body" style="background:#0f1722;color:#dbe7f3;padding:18px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:14px">
+      <div>
+        <div style="font-size:11px;color:#87a0b8;letter-spacing:.08em;text-transform:uppercase">StateScope Session</div>
+        <div style="font-size:24px;font-weight:700;line-height:1.15;margin-top:4px">Ready to Inspect</div>
+        <div style="font-size:13px;color:#9fb3c8;margin-top:6px">先判断工具有没有准备好，再进入证据和风险。</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+        <span style="padding:5px 10px;border-radius:999px;background:#10263e;color:#83bfff">traditional</span>
+        <span style="padding:5px 10px;border-radius:999px;background:#13261a;color:#8de2a8">Hook ready</span>
+        <span style="padding:5px 10px;border-radius:999px;background:#291b08;color:#f8c56d">Allowlist 18</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:220px 1fr;gap:14px">
+      <div style="background:#101925;border:1px solid #223244;border-radius:14px;padding:12px">
+        <div style="font-size:11px;color:#87a0b8;text-transform:uppercase;margin-bottom:10px">Workspace Tabs</div>
+        <div style="display:grid;gap:8px">
+          <div style="padding:9px 10px;border-radius:10px;background:#142234;border:1px solid #2a4967;color:#dbe7f3;font-weight:600">Overview</div>
+          <div style="padding:9px 10px;border-radius:10px;background:#0d1520;border:1px solid #223244;color:#8ea0b5">Epoch Timeline</div>
+          <div style="padding:9px 10px;border-radius:10px;background:#0d1520;border:1px solid #223244;color:#8ea0b5">Diff Workspace</div>
+          <div style="padding:9px 10px;border-radius:10px;background:#0d1520;border:1px solid #223244;color:#8ea0b5">Cutover Report</div>
+          <div style="padding:9px 10px;border-radius:10px;background:#0d1520;border:1px solid #223244;color:#8ea0b5">Scenario Regression</div>
+          <div style="padding:9px 10px;border-radius:10px;background:#0d1520;border:1px solid #223244;color:#8ea0b5">Issues</div>
+          <div style="padding:9px 10px;border-radius:10px;background:#0d1520;border:1px solid #223244;color:#8ea0b5">Settings</div>
+        </div>
+      </div>
+
+      <div style="display:grid;gap:14px">
+        <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px">
+            <div>
+              <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Session Readiness</div>
+              <div style="font-size:18px;font-weight:700;margin-top:4px">4 checks before we trust the data</div>
+            </div>
+            <div style="padding:6px 10px;border-radius:999px;background:#13261a;color:#8de2a8;font-size:12px">3 / 4 ready</div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+            <div style="background:#0d1520;border:1px solid #223244;border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:#87a0b8">bizDebug</div>
+              <div style="font-size:18px;font-weight:700;margin:6px 0">Enabled</div>
+              <div style="font-size:12px;color:#8de2a8">ready</div>
+            </div>
+            <div style="background:#0d1520;border:1px solid #223244;border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:#87a0b8">Hook</div>
+              <div style="font-size:18px;font-weight:700;margin:6px 0">Attached</div>
+              <div style="font-size:12px;color:#8de2a8">ready</div>
+            </div>
+            <div style="background:#0d1520;border:1px solid #223244;border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:#87a0b8">Profile</div>
+              <div style="font-size:18px;font-weight:700;margin:6px 0">traditional</div>
+              <div style="font-size:12px;color:#f8c56d">verify mapping</div>
+            </div>
+            <div style="background:#0d1520;border:1px solid #223244;border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:#87a0b8">Allowlist</div>
+              <div style="font-size:18px;font-weight:700;margin:6px 0">18 fields</div>
+              <div style="font-size:12px;color:#8de2a8">ready</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+            <div style="padding:8px 10px;border-radius:10px;background:#142234;border:1px solid #28415b">Enable and reload</div>
+            <div style="padding:8px 10px;border-radius:10px;background:#142234;border:1px solid #28415b">Rediscover hooks</div>
+            <div style="padding:8px 10px;border-radius:10px;background:#142234;border:1px solid #28415b">Apply profile</div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1.1fr .9fr;gap:14px">
+          <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+            <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Latest Evidence</div>
+            <div style="font-size:18px;font-weight:700;margin:4px 0 10px">Most recent epoch</div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+              <div style="background:#0d1520;border-radius:10px;padding:10px"><div style="font-size:11px;color:#87a0b8">Epoch</div><div style="font-size:20px;font-weight:700">#12</div></div>
+              <div style="background:#0d1520;border-radius:10px;padding:10px"><div style="font-size:11px;color:#87a0b8">Changed</div><div style="font-size:20px;font-weight:700">34</div></div>
+              <div style="background:#0d1520;border-radius:10px;padding:10px"><div style="font-size:11px;color:#87a0b8">Snapshot</div><div style="font-size:20px;font-weight:700">87</div></div>
+              <div style="background:#2a1216;border-radius:10px;padding:10px"><div style="font-size:11px;color:#f0b4bd">Mismatch</div><div style="font-size:20px;font-weight:700;color:#ff98a3">2</div></div>
+            </div>
+            <div style="background:#0d1520;border:1px solid #223244;border-radius:12px;padding:12px;margin-bottom:10px">warehouseId diverged after refreshView, taxRate recalculated normally</div>
+            <div style="display:grid;gap:8px">
+              <div style="padding:8px 10px;background:#0d1520;border:1px solid #223244;border-radius:10px">Timeline preview · last 3 epochs</div>
+              <div style="padding:8px 10px;background:#0d1520;border:1px solid #223244;border-radius:10px">Selected epoch detail · changed set / main / detail</div>
+            </div>
+          </div>
+
+          <div style="display:grid;gap:14px">
+            <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+              <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Risk Queue</div>
+              <div style="font-size:18px;font-weight:700;margin:4px 0 10px">What needs attention</div>
+              <div style="display:grid;gap:8px">
+                <div style="padding:10px;border-radius:10px;background:#2a1216;border:1px solid #4f2028;color:#ffd5da">warehouseId · old=true new=false</div>
+                <div style="padding:10px;border-radius:10px;background:#2a1216;border:1px solid #4f2028;color:#ffd5da">taxRate · pending new track</div>
+                <div style="padding:10px;border-radius:10px;background:#10263e;border:1px solid #274868;color:#cae5ff">Open Diff workspace →</div>
+              </div>
+            </div>
+            <div style="background:#101925;border:1px solid #223244;border-radius:16px;padding:14px">
+              <div style="font-size:11px;color:#87a0b8;text-transform:uppercase">Quick Utilities</div>
+              <div style="font-size:18px;font-weight:700;margin:4px 0 10px">Copy and export</div>
+              <div style="display:grid;gap:8px">
+                <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">Copy diagnoseLastEpoch</div>
+                <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">Copy console filter</div>
+                <div style="padding:10px;border-radius:10px;background:#0d1520;border:1px solid #223244">Export epoch JSON</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>这部分要确认的点</h3>
+  <p class="subtitle">是否接受这个概览页逻辑：先看启动状态，再看最新证据，右侧单独抽出风险和快捷操作。</p>
+</div>

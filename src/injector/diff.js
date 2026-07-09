@@ -1,4 +1,5 @@
 import { valuesEqual } from './normalize.js';
+import { isSnapKeyInAllowlistSet } from './allowlist-config.js';
 
 const SEVERITY = {
   OK: 'ok',
@@ -12,7 +13,7 @@ export function diffSnapshots(oldSnap, newSnap, allowlist) {
   const diffs = [];
 
   for (const key of keys) {
-    if (allowlist?.size && !allowlist.has(stripStateSuffix(key))) {
+    if (allowlist?.size && !isSnapKeyInAllowlistSet(key, allowlist)) {
       continue;
     }
 

@@ -13,9 +13,18 @@ export function formatVal(value) {
   return String(value);
 }
 
-export function formatValLong(value) {
+export function formatValLong(value, path) {
   if (value === undefined) {
     return '—';
+  }
+  const stateType = typeof path === 'string' ? path.split('.').pop() : '';
+  if (stateType === 'visible') {
+    if (value === true) {
+      return 'true (visible/显示)';
+    }
+    if (value === false) {
+      return 'false (hidden/隐藏)';
+    }
   }
   if (value === true) {
     return 'true (disabled/不可编辑)';

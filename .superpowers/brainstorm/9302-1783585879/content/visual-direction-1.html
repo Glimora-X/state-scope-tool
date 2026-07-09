@@ -1,0 +1,207 @@
+<h2>StateScope Panel Reframe</h2>
+<p class="subtitle">先只锁定信息架构气质和视觉语言，不锁最终文案细节。选一个最接近你想要的专业调试工具。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A. Native DevTools</div>
+        <div class="mockup-body" style="background:#10161f;color:#d7dee7;padding:14px;min-height:260px">
+          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #273241;padding-bottom:10px;margin-bottom:12px">
+            <div>
+              <div style="font-size:11px;color:#8ea0b5;letter-spacing:.04em;text-transform:uppercase">StateScope</div>
+              <div style="font-size:18px;font-weight:700">Inspection Workspace</div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <span style="padding:4px 8px;border:1px solid #2e7d32;border-radius:999px;color:#8de2a8">Hook Ready</span>
+              <span style="padding:4px 8px;border:1px solid #7f1d1d;border-radius:999px;color:#ffb3b3">2 Mismatch</span>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:180px 1fr;gap:12px">
+            <div style="border:1px solid #273241;border-radius:10px;padding:10px">
+              <div style="font-size:11px;color:#8ea0b5;text-transform:uppercase;margin-bottom:8px">Workflow</div>
+              <div style="display:grid;gap:8px">
+                <div style="background:#162130;border:1px solid #24415f;border-radius:8px;padding:8px">Start Check</div>
+                <div style="background:#162130;border:1px solid #24415f;border-radius:8px;padding:8px">Live Timeline</div>
+                <div style="background:#162130;border:1px solid #24415f;border-radius:8px;padding:8px">Focused Diff</div>
+                <div style="background:#111926;border:1px solid #273241;border-radius:8px;padding:8px;color:#7f8ea3">Regression</div>
+              </div>
+            </div>
+            <div style="display:grid;gap:10px">
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+                <div style="background:#162130;border:1px solid #273241;border-radius:10px;padding:10px"><div style="font-size:11px;color:#8ea0b5">Epochs</div><div style="font-size:22px;font-weight:700">12</div></div>
+                <div style="background:#162130;border:1px solid #273241;border-radius:10px;padding:10px"><div style="font-size:11px;color:#8ea0b5">Changed</div><div style="font-size:22px;font-weight:700">34</div></div>
+                <div style="background:#162130;border:1px solid #273241;border-radius:10px;padding:10px"><div style="font-size:11px;color:#8ea0b5">Mismatch</div><div style="font-size:22px;font-weight:700;color:#ffb3b3">2</div></div>
+                <div style="background:#162130;border:1px solid #273241;border-radius:10px;padding:10px"><div style="font-size:11px;color:#8ea0b5">Profile</div><div style="font-size:22px;font-weight:700">trad</div></div>
+              </div>
+              <div style="display:grid;grid-template-columns:1.1fr .9fr;gap:10px">
+                <div style="border:1px solid #273241;border-radius:10px;padding:10px">
+                  <div style="font-size:11px;color:#8ea0b5;text-transform:uppercase;margin-bottom:8px">Timeline</div>
+                  <div style="display:grid;gap:7px">
+                    <div style="background:#0e141d;border:1px solid #273241;border-radius:8px;padding:8px">#12 warehouseId mismatch</div>
+                    <div style="background:#0e141d;border:1px solid #273241;border-radius:8px;padding:8px">#11 pricing terms changed</div>
+                    <div style="background:#0e141d;border:1px solid #273241;border-radius:8px;padding:8px">#10 refreshView ready</div>
+                  </div>
+                </div>
+                <div style="border:1px solid #273241;border-radius:10px;padding:10px">
+                  <div style="font-size:11px;color:#8ea0b5;text-transform:uppercase;margin-bottom:8px">Selected Epoch</div>
+                  <div style="background:#0e141d;border:1px solid #273241;border-radius:8px;padding:8px;margin-bottom:8px">Top finding: old=true, new=false</div>
+                  <div style="display:grid;gap:6px">
+                    <div style="height:8px;background:linear-gradient(90deg,#ef4444 0 34%,#1f2937 34%);border-radius:999px"></div>
+                    <div style="height:8px;background:linear-gradient(90deg,#60a5fa 0 72%,#1f2937 72%);border-radius:999px"></div>
+                    <div style="height:8px;background:linear-gradient(90deg,#22c55e 0 81%,#1f2937 81%);border-radius:999px"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 原生 DevTools 风格</h3>
+      <p>高密度、低装饰、像工程师每天会开的诊断工作台。先把启动、时间线、Diff 三步做成主路径。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B. Operator Cockpit</div>
+        <div class="mockup-body" style="background:#0f1722;color:#dbe7f3;padding:14px;min-height:260px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div style="font-size:18px;font-weight:700">Migration Control Deck</div>
+            <div style="display:flex;gap:8px">
+              <span style="padding:4px 8px;background:#10263e;border-radius:999px;color:#83bfff">traditional</span>
+              <span style="padding:4px 8px;background:#3a1118;border-radius:999px;color:#ff98a3">Risk 2</span>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1.2fr .8fr;gap:10px">
+            <div style="display:grid;gap:10px">
+              <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:12px">
+                <div style="font-size:11px;color:#88a0b8;text-transform:uppercase;margin-bottom:6px">Session Status</div>
+                <div style="font-size:24px;font-weight:700">2 risky fields need review</div>
+                <div style="margin-top:8px;color:#9fb3c8">warehouseId and taxRate diverged after refreshView</div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+                <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:10px"><div style="font-size:11px;color:#88a0b8">Ready</div><div style="font-size:22px;font-weight:700">9</div></div>
+                <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:10px"><div style="font-size:11px;color:#88a0b8">Pending</div><div style="font-size:22px;font-weight:700">5</div></div>
+                <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:10px"><div style="font-size:11px;color:#88a0b8">Muted</div><div style="font-size:22px;font-weight:700">21</div></div>
+              </div>
+              <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:12px">
+                <div style="font-size:11px;color:#88a0b8;text-transform:uppercase;margin-bottom:8px">Action Queue</div>
+                <div style="display:grid;gap:8px">
+                  <div style="border-left:3px solid #ef4444;padding-left:10px">Review mismatch in Diff workspace</div>
+                  <div style="border-left:3px solid #f59e0b;padding-left:10px">Reload page to refresh hook binding</div>
+                  <div style="border-left:3px solid #38bdf8;padding-left:10px">Switch to lowcode profile if BO changed</div>
+                </div>
+              </div>
+            </div>
+            <div style="display:grid;gap:10px">
+              <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:12px">
+                <div style="font-size:11px;color:#88a0b8;text-transform:uppercase;margin-bottom:8px">Route Map</div>
+                <div style="display:grid;gap:8px">
+                  <div style="padding:8px;border:1px solid #24384f;border-radius:8px">1. Activate</div>
+                  <div style="padding:8px;border:1px solid #24384f;border-radius:8px">2. Observe Epoch</div>
+                  <div style="padding:8px;border:1px solid #24384f;border-radius:8px">3. Validate Diff</div>
+                  <div style="padding:8px;border:1px solid #24384f;border-radius:8px">4. Log Issue</div>
+                </div>
+              </div>
+              <div style="background:#121d2b;border:1px solid #203042;border-radius:12px;padding:12px">
+                <div style="font-size:11px;color:#88a0b8;text-transform:uppercase;margin-bottom:8px">Evidence</div>
+                <div style="height:132px;border-radius:8px;background:linear-gradient(180deg,#0b1220,#0d1626);border:1px solid #1d2b3d;padding:8px">
+                  <div style="height:10px;width:74%;background:#334155;border-radius:999px;margin-bottom:8px"></div>
+                  <div style="height:10px;width:56%;background:#334155;border-radius:999px;margin-bottom:8px"></div>
+                  <div style="height:10px;width:88%;background:#7f1d1d;border-radius:999px;margin-bottom:8px"></div>
+                  <div style="height:10px;width:43%;background:#334155;border-radius:999px;margin-bottom:8px"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 风险驾驶舱</h3>
+      <p>先告诉你当前会话有没有风险、下一步做什么，再展开证据。更偏“指挥台”，对新接手的人更友好。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C. Investigation Workspace</div>
+        <div class="mockup-body" style="background:#eef3f8;color:#0f1720;padding:14px;min-height:260px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <div>
+              <div style="font-size:11px;color:#53657a;letter-spacing:.04em;text-transform:uppercase">StateScope Session</div>
+              <div style="font-size:20px;font-weight:700">Mismatch Investigation</div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <span style="padding:4px 8px;border:1px solid #c8d4e3;border-radius:999px;background:#fff">Epoch #12</span>
+              <span style="padding:4px 8px;border:1px solid #f0b3b3;border-radius:999px;background:#fff3f2;color:#aa2020">Needs review</span>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:.9fr 1.1fr;gap:12px">
+            <div style="display:grid;gap:10px">
+              <div style="background:#fff;border:1px solid #d7e1ec;border-radius:14px;padding:12px">
+                <div style="font-size:11px;color:#53657a;text-transform:uppercase;margin-bottom:8px">Guided steps</div>
+                <div style="display:grid;gap:8px">
+                  <div style="display:flex;gap:8px"><strong>1</strong><span>Confirm hook and profile</span></div>
+                  <div style="display:flex;gap:8px"><strong>2</strong><span>Trigger one field change</span></div>
+                  <div style="display:flex;gap:8px"><strong>3</strong><span>Compare old and new result</span></div>
+                  <div style="display:flex;gap:8px"><strong>4</strong><span>Escalate if mismatch persists</span></div>
+                </div>
+              </div>
+              <div style="background:#fff;border:1px solid #d7e1ec;border-radius:14px;padding:12px">
+                <div style="font-size:11px;color:#53657a;text-transform:uppercase;margin-bottom:8px">Session health</div>
+                <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+                  <div style="background:#f6f9fc;border-radius:10px;padding:10px"><div style="font-size:11px;color:#53657a">Hook</div><div style="font-weight:700">Ready</div></div>
+                  <div style="background:#f6f9fc;border-radius:10px;padding:10px"><div style="font-size:11px;color:#53657a">Profile</div><div style="font-weight:700">auto</div></div>
+                  <div style="background:#f6f9fc;border-radius:10px;padding:10px"><div style="font-size:11px;color:#53657a">Allowlist</div><div style="font-weight:700">18 fields</div></div>
+                  <div style="background:#fdf2f2;border-radius:10px;padding:10px"><div style="font-size:11px;color:#8b3c3c">Risk</div><div style="font-weight:700;color:#aa2020">2 mismatch</div></div>
+                </div>
+              </div>
+            </div>
+            <div style="display:grid;gap:10px">
+              <div style="background:#fff;border:1px solid #d7e1ec;border-radius:14px;padding:12px">
+                <div style="font-size:11px;color:#53657a;text-transform:uppercase;margin-bottom:8px">Focused comparison</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                  <div style="border:1px solid #d7e1ec;border-radius:10px;padding:10px">
+                    <div style="font-size:12px;color:#53657a;margin-bottom:8px">Old track</div>
+                    <div style="height:12px;background:#cbd5e1;border-radius:999px;margin-bottom:10px"></div>
+                    <div style="height:12px;background:#cbd5e1;border-radius:999px;margin-bottom:10px;width:70%"></div>
+                    <div style="height:12px;background:#fca5a5;border-radius:999px;width:52%"></div>
+                  </div>
+                  <div style="border:1px solid #d7e1ec;border-radius:10px;padding:10px">
+                    <div style="font-size:12px;color:#53657a;margin-bottom:8px">New track</div>
+                    <div style="height:12px;background:#cbd5e1;border-radius:999px;margin-bottom:10px"></div>
+                    <div style="height:12px;background:#cbd5e1;border-radius:999px;margin-bottom:10px;width:58%"></div>
+                    <div style="height:12px;background:#86efac;border-radius:999px;width:52%"></div>
+                  </div>
+                </div>
+              </div>
+              <div style="background:#fff;border:1px solid #d7e1ec;border-radius:14px;padding:12px">
+                <div style="font-size:11px;color:#53657a;text-transform:uppercase;margin-bottom:8px">Narrative timeline</div>
+                <div style="display:grid;gap:8px">
+                  <div style="padding:8px 10px;border-radius:10px;background:#f6f9fc">10:03 refreshView completed, 3 fields recalculated</div>
+                  <div style="padding:8px 10px;border-radius:10px;background:#fff3f2;border:1px solid #f7c5c3">10:04 warehouseId diverged between tracks</div>
+                  <div style="padding:8px 10px;border-radius:10px;background:#f6f9fc">10:05 allowlist narrowed to 18 tracked fields</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 引导式调查台</h3>
+      <p>把复杂调试拆成“检查、触发、比对、升级”四步，更适合第一次用这个扩展的人，但密度会稍低。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>这轮只回答一个问题</h3>
+  <p class="subtitle">A、B、C 哪个最接近你想要的方向？也可以说“以 A 为主，借一点 B”。</p>
+</div>

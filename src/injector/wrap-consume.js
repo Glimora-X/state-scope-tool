@@ -1,5 +1,4 @@
-import { flattenStatePatches } from './normalize.js';
-import { filterTopLevelEntries } from './path-filter.js';
+import { captureStatePatchesAsSnap } from './normalize.js';
 import { isWrapped, markWrapped } from './discover.js';
 import { collectOldEntriesFromChangeData } from './wrap-old.js';
 import {
@@ -56,7 +55,7 @@ export function wrapFormController(formController, epochManager) {
     }
 
     if (hasNew) {
-      epochManager.recordNew(filterTopLevelEntries(flattenStatePatches(statePatches)));
+      epochManager.recordNew(captureStatePatchesAsSnap(statePatches));
     }
 
     epochManager.commitEpoch();

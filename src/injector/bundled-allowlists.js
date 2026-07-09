@@ -1,8 +1,10 @@
 import goodsIssueV1 from '../../allowlists/GoodsIssue.v1.json';
+import outsourceIssueV1 from '../../allowlists/OutsourceIssue.v1.json';
 
 /** 构建时内嵌，不依赖 content script fetch / CSP 允许的内联脚本 */
 export const BUNDLED_ALLOWLISTS = {
-  GoodsIssue: goodsIssueV1
+  GoodsIssue: goodsIssueV1,
+  OutsourceIssue: outsourceIssueV1
 };
 
 export function getBundledAllowlist(boName) {

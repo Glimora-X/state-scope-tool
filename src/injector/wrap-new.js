@@ -1,24 +1,35 @@
-import { flattenStatePatches } from './normalize.js';
-import { filterTopLevelEntries } from './path-filter.js';
+import { captureStatePatchesAsSnap } from './normalize.js';
 import { isWrapped, markWrapped } from './discover.js';
+
+const INIT_FULL_COMMAND_PATHS = new Set(['initBlank', 'blank', 'load', 'edit', 'copy']);
+
+function resolveDispatchPhase(action) {
+  if (action?.type === 'init') {
+    return 'init-full';
+  }
+  if (action?.type === 'command' && INIT_FULL_COMMAND_PATHS.has(action.path)) {
+    return 'init-full';
+  }
+  return 'incremental';
+}
 
 export function wrapDispatchAction(bizApplication, epochManager) {
   if (!bizApplication || isWrapped(bizApplication)) {
-    return;
+    return false;
   }
 
   const original = bizApplication.dispatchAction?.bind(bizApplication);
   if (typeof original !== 'function') {
-    return;
+    return false;
   }
 
   bizApplication.dispatchAction = async function dispatchActionWrapped(action, cb) {
-    const actionPath = action?.path || action?.params?.path || 'unknown';
+    const actionPath = action?.path || action?.params?.path || action?.type || 'unknown';
     const result = await original(action, cb);
 
     if (result?.statePatches && Object.keys(result.statePatches).length > 0) {
-      epochManager.beginEpoch(actionPath, 'incremental');
-      epochManager.recordNew(filterTopLevelEntries(flattenStatePatches(result.statePatches)));
+      epochManager.beginEpoch(String(actionPath), resolveDispatchPhase(action));
+      epochManager.recordNew(captureStatePatchesAsSnap(result.statePatches));
       epochManager.commitEpoch();
     }
 
@@ -26,16 +37,17 @@ export function wrapDispatchAction(bizApplication, epochManager) {
   };
 
   markWrapped(bizApplication);
+  return true;
 }
 
 export function wrapComputeInitialStates(stateManager, epochManager) {
   if (!stateManager || isWrapped(stateManager)) {
-    return;
+    return false;
   }
 
   const original = stateManager.computeInitialStates?.bind(stateManager);
   if (typeof original !== 'function') {
-    return;
+    return false;
   }
 
   stateManager.computeInitialStates = async function computeInitialStatesWrapped(...args) {
@@ -43,7 +55,7 @@ export function wrapComputeInitialStates(stateManager, epochManager) {
 
     if (patches && Object.keys(patches).length > 0) {
       epochManager.beginEpoch('computeInitialStates', 'init-full');
-      epochManager.recordNew(filterTopLevelEntries(flattenStatePatches(patches)));
+      epochManager.recordNew(captureStatePatchesAsSnap(patches));
       epochManager.commitEpoch();
     }
 
@@ -51,4 +63,5 @@ export function wrapComputeInitialStates(stateManager, epochManager) {
   };
 
   markWrapped(stateManager);
+  return true;
 }
