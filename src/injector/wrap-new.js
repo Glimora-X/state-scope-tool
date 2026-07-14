@@ -1,5 +1,6 @@
 import { captureStatePatchesAsSnap } from './normalize.js';
-import { isWrapped, markWrapped } from './discover.js';
+import { isWrapped, markWrapped, unmarkWrapped } from './discover.js';
+import { registerHook, markTriggered } from './hook-registry.js';
 
 const INIT_FULL_COMMAND_PATHS = new Set(['initBlank', 'blank', 'load', 'edit', 'copy']);
 
@@ -18,12 +19,15 @@ export function wrapDispatchAction(bizApplication, epochManager) {
     return false;
   }
 
-  const original = bizApplication.dispatchAction?.bind(bizApplication);
-  if (typeof original !== 'function') {
+  const rawDispatch = bizApplication.dispatchAction;
+  if (typeof rawDispatch !== 'function') {
     return false;
   }
 
-  bizApplication.dispatchAction = async function dispatchActionWrapped(action, cb) {
+  const original = rawDispatch.bind(bizApplication);
+
+  const wrapped = async function dispatchActionWrapped(action, cb) {
+    markTriggered('dispatchAction');
     const actionPath = action?.path || action?.params?.path || action?.type || 'unknown';
     const result = await original(action, cb);
 
@@ -35,6 +39,19 @@ export function wrapDispatchAction(bizApplication, epochManager) {
 
     return result;
   };
+  bizApplication.dispatchAction = wrapped;
+
+  registerHook({
+    name: 'dispatchAction',
+    target: bizApplication,
+    methodName: 'dispatchAction',
+    original: rawDispatch,
+    wrapped,
+    onUnwrap() {
+      bizApplication.dispatchAction = rawDispatch;
+      unmarkWrapped(bizApplication);
+    }
+  });
 
   markWrapped(bizApplication);
   return true;
@@ -45,12 +62,15 @@ export function wrapComputeInitialStates(stateManager, epochManager) {
     return false;
   }
 
-  const original = stateManager.computeInitialStates?.bind(stateManager);
-  if (typeof original !== 'function') {
+  const rawCompute = stateManager.computeInitialStates;
+  if (typeof rawCompute !== 'function') {
     return false;
   }
 
-  stateManager.computeInitialStates = async function computeInitialStatesWrapped(...args) {
+  const original = rawCompute.bind(stateManager);
+
+  const wrapped = async function computeInitialStatesWrapped(...args) {
+    markTriggered('computeInitialStates');
     const patches = await original(...args);
 
     if (patches && Object.keys(patches).length > 0) {
@@ -61,6 +81,19 @@ export function wrapComputeInitialStates(stateManager, epochManager) {
 
     return patches;
   };
+  stateManager.computeInitialStates = wrapped;
+
+  registerHook({
+    name: 'computeInitialStates',
+    target: stateManager,
+    methodName: 'computeInitialStates',
+    original: rawCompute,
+    wrapped,
+    onUnwrap() {
+      stateManager.computeInitialStates = rawCompute;
+      unmarkWrapped(stateManager);
+    }
+  });
 
   markWrapped(stateManager);
   return true;

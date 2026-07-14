@@ -13,8 +13,9 @@ import {
   formatEpochTime,
   groupChangedByBusiness
 } from './panel-view-model.js';
-import { getScenarioTag } from './scenario-context.js';
+import { getScenarioTag, getScenarioCatalogPack } from './scenario-context.js';
 import { getRuntimeMeta } from './detect.js';
+import { getHookLiveness } from './hook-registry.js';
 import {
   buildChangedSetFinalSnap,
   buildDetailGrids,
@@ -28,6 +29,9 @@ import {
   summarizeDiffs
 } from './snap-view.js';
 
+import { severityZh, SHADOW_STORE_MISSING, NEW_ONLY_HINT } from '../shared/zh-labels.js';
+import { alignLowcodeDetailIndexUuidKeys } from './lowcode-sample.js';
+
 function enrichDiffRow(row, hasNewChain, profile) {
   const parsed = row.path.split('.');
   let displayName = parsed[parsed.length - 2] || row.path;
@@ -38,7 +42,6 @@ function enrichDiffRow(row, hasNewChain, profile) {
   }
 
   if (!hasNewChain) {
-    const pendingLabel = profile === 'lowcode' ? 'shadow 未接入' : '待接入';
     return {
       ...row,
       displayName,
@@ -47,20 +50,28 @@ function enrichDiffRow(row, hasNewChain, profile) {
       newLabel: '—',
       new: undefined,
       severity: 'pending',
-      resultLabel: pendingLabel
+      resultLabel: SHADOW_STORE_MISSING.short
     };
   }
 
+  const severity = row.severity;
   return {
     ...row,
     displayName,
     gridHint,
     oldLabel: formatVal(row.old),
     newLabel: formatVal(row.new),
-    resultLabel: row.severity
+    resultLabel: severityZh(severity),
+    hint: severity === 'new-only' && profile === 'lowcode' ? NEW_ONLY_HINT.subline : undefined
   };
 }
 
+/**
+ * 解析 Diff 旧侧（old-side）快照。
+ *
+ * - lowcode：返回 finalSnap（即可见态），Diff 旧侧 = 用户所见终态
+ * - traditional：返回 oldSnap 或 finalSnap（取决于 phase 和 scope）
+ */
 function resolveOldSnapForDiff(epoch, profile) {
   const oldSnap = epoch.oldSnap || {};
   const finalSnap = epoch.finalSnap || {};
@@ -81,6 +92,12 @@ function resolveOldSnapForDiff(epoch, profile) {
   return oldSnap;
 }
 
+/**
+ * 解析 Diff 新侧（new-side）快照。
+ *
+ * - lowcode：返回 shadowSnap（影子态），Diff 新侧 = shadowStore 终态
+ * - traditional：返回 newSnap（升级后链路终态）
+ */
 function resolveNewSnapForDiff(epoch, profile) {
   const newSnap = epoch.newSnap || {};
   const shadowSnap = epoch.shadowSnap || {};
@@ -111,8 +128,14 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
   const mainSnap = pickMainKeys(epoch.finalSnap);
   const detailSnap = pickDetailKeys(epoch.finalSnap, epoch.changedSample);
 
-  const oldSnapForDiff = resolveOldSnapForDiff(epoch, profile);
-  const newSnapForDiff = resolveNewSnapForDiff(epoch, profile);
+  const oldSnapForDiffRaw = resolveOldSnapForDiff(epoch, profile);
+  const newSnapForDiffRaw = resolveNewSnapForDiff(epoch, profile);
+  const aligned =
+    profile === 'lowcode' ?
+      alignLowcodeDetailIndexUuidKeys(oldSnapForDiffRaw, newSnapForDiffRaw)
+    : { oldSnap: oldSnapForDiffRaw, newSnap: newSnapForDiffRaw };
+  const oldSnapForDiff = aligned.oldSnap;
+  const newSnapForDiff = aligned.newSnap;
   const rawDiffs = diffSnapshots(oldSnapForDiff, newSnapForDiff, allowlist);
   const diffs = rawDiffs.map((row) => enrichDiffRow(row, hasNewChain, profile));
   const diffSummary = summarizeDiffs(diffs);
@@ -185,12 +208,21 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
       hasDetailKeys(epoch.finalSnap, epoch.changedSample) || (epoch.scope?.detailRowsInChangedSet || 0) > 0,
     allowlistMeta: buildAllowlistMeta(allowlistConfig),
     allowlistFieldResults: buildAllowlistFieldResults(allowlistConfig, rawDiffs, hasNewChain),
-    scenarioTag: getScenarioTag() || ''
+    scenarioTag: getScenarioTag() || '',
+    isBootstrap: !!epoch.isBootstrap,
+    shadowCaptured: epoch.shadowCaptured !== undefined ? !!epoch.shadowCaptured : hasNewChain,
+    bootstrapQuality: epoch.bootstrapQuality || undefined,
+    visibleSnap: profile === 'lowcode' ? oldSnapForDiff : undefined,
+    shadowSnap: profile === 'lowcode' ? newSnapForDiff : undefined,
+    diffAxis: profile === 'lowcode'
+      ? { old: 'visibleSnap (用户所见)', new: 'shadowSnap (影子终态)' }
+      : { old: 'oldSnap (操作前)', new: 'newSnap (操作后)' }
   };
 }
 
 export function buildRuntimePayload(runtimeContext) {
   const meta = getRuntimeMeta(runtimeContext);
+  const catalogPack = meta.boName ? getScenarioCatalogPack(meta.boName) : null;
 
   return {
     meta,
@@ -206,6 +238,8 @@ export function buildRuntimePayload(runtimeContext) {
       profile: meta.profile,
       profileDetection: meta.profileDetection || null
     },
+    hookLiveness: getHookLiveness(),
+    scenarioCatalogPack: catalogPack || undefined,
     updatedAt: Date.now()
   };
 }

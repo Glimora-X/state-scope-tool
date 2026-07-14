@@ -28,6 +28,44 @@ function storageSet(key, value) {
   });
 }
 
+function sessionGet(key) {
+  return new Promise((resolve) => {
+    chrome.storage.session.get(key, (result) => resolve(result[key]));
+  });
+}
+
+function sessionSet(key, value) {
+  return new Promise((resolve) => {
+    chrome.storage.session.set({ [key]: value }, resolve);
+  });
+}
+
+function sessionRemove(key) {
+  return new Promise((resolve) => {
+    chrome.storage.session.remove(key, resolve);
+  });
+}
+
+function localRemove(key) {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(key, resolve);
+  });
+}
+
+let migrationDone = false;
+
+async function migrateTokenToSession() {
+  if (migrationDone) {
+    return;
+  }
+  migrationDone = true;
+  const legacy = await storageGet(JIRA_TOKEN_KEY);
+  if (legacy?.apiToken) {
+    await sessionSet(JIRA_TOKEN_KEY, { apiToken: legacy.apiToken });
+    await localRemove(JIRA_TOKEN_KEY);
+  }
+}
+
 export async function loadSettings() {
   const saved = await storageGet(SETTINGS_KEY);
   return { ...defaultSettings(), ...(saved || {}) };
@@ -51,20 +89,23 @@ export async function saveSettings(partial) {
 
 export async function saveJiraToken(apiToken) {
   if (!apiToken) {
-    await storageSet(JIRA_TOKEN_KEY, null);
+    await sessionRemove(JIRA_TOKEN_KEY);
     return false;
   }
-  await storageSet(JIRA_TOKEN_KEY, { apiToken: String(apiToken) });
+  await sessionSet(JIRA_TOKEN_KEY, { apiToken: String(apiToken) });
+  await localRemove(JIRA_TOKEN_KEY);
   return true;
 }
 
 export async function loadJiraToken() {
-  const saved = await storageGet(JIRA_TOKEN_KEY);
+  await migrateTokenToSession();
+  const saved = await sessionGet(JIRA_TOKEN_KEY);
   return saved?.apiToken || '';
 }
 
 export async function clearJiraToken() {
-  await storageSet(JIRA_TOKEN_KEY, null);
+  await sessionRemove(JIRA_TOKEN_KEY);
+  await localRemove(JIRA_TOKEN_KEY);
 }
 
 export async function getSettingsForPanel() {

@@ -18,8 +18,38 @@ let epochCounter = 0;
 const MAX_DETAIL_LINES = 12;
 const MAX_RESULT_LINES = 20;
 
-export function createEpochManager(onFinalize) {
+export function resetEpochCounter() {
+  epochCounter = 0;
+}
+
+/**
+ * Epoch 数据字段语义（按 profile 区分）：
+ *
+ * traditional（传统线）:
+ *   oldSnap     = 操作前状态（changedSet 字段值）
+ *   finalSnap   = 操作后终态（checkChangeStates 结果）
+ *   newSnap     = 升级后链路终态（dispatchAction → computeInitialStates）
+ *   shadowSnap  = 未使用
+ *
+ * lowcode（低代码线）:
+ *   oldSnap     = 可见态（= finalSnap，命名残留，勿与 traditional 混淆）
+ *   finalSnap   = 可见态（用户所见 / getDisable 读路径 / fieldModel 终态）
+ *   newSnap     = 通常为空
+ *   shadowSnap  = 影子态（shadowStore / applyStatePatches 写入）
+ *
+ *   实际 Diff 轴：finalSnap（可见态）vs shadowSnap（影子态）
+ */
+export function createEpochManager(onFinalize, boName) {
   let currentEpoch = null;
+  let managerBoName = boName || '';
+
+  function setBoName(name) {
+    managerBoName = name || '';
+  }
+
+  function getBoName() {
+    return managerBoName;
+  }
 
   function beginEpoch(trigger, phase = 'incremental') {
     epochCounter += 1;
@@ -27,6 +57,7 @@ export function createEpochManager(onFinalize) {
       id: epochCounter,
       trigger,
       phase,
+      boName: managerBoName,
       startedAt: Date.now(),
       scope: null,
       changedSample: {},
@@ -41,6 +72,12 @@ export function createEpochManager(onFinalize) {
   function setScope(scope) {
     if (currentEpoch) {
       currentEpoch.scope = scope;
+    }
+  }
+
+  function setMeta(meta) {
+    if (currentEpoch && meta) {
+      Object.assign(currentEpoch, meta);
     }
   }
 
@@ -102,13 +139,16 @@ export function createEpochManager(onFinalize) {
   return {
     beginEpoch,
     setScope,
+    setMeta,
     recordChangedSample,
     recordFinal,
     recordOld,
     recordNew,
     recordShadow,
     commitEpoch,
-    finalizeEpoch: commitEpoch
+    finalizeEpoch: commitEpoch,
+    setBoName,
+    getBoName
   };
 }
 
@@ -139,7 +179,7 @@ function printSnapSection(label, snap) {
 
 export function reportEpochToConsole(epoch, meta, allowlistConfig) {
   const payload = buildPanelEpochPayload(epoch, meta, allowlistConfig);
-  storeEpoch(epoch, meta);
+  storeEpoch({ ...epoch, scenarioTag: payload.scenarioTag }, meta);
   publishEpochToPanel(payload);
 
   if (!isConsoleOutputEnabled()) {
@@ -158,6 +198,10 @@ export function reportEpochToConsole(epoch, meta, allowlistConfig) {
 
   if (!hasNewChain && (Object.keys(epoch.finalSnap).length > 0 || epoch.scope)) {
     scopeLog(`${header} | ${groupTitle}`);
+    scopeLog(
+      '【影子未写入】框架已采到升级前 finalSnap；shadowStore 无升级后终态（非字段清单问题）。' +
+        ' statePatches 已算完也不算接入，须写入 shadowStore。'
+    );
 
     if (scopeLine) {
       scopeLog(`scope: ${scopeLine}`);

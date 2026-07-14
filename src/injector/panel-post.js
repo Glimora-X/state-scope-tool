@@ -1,4 +1,5 @@
 import { cacheEpochPayload, cacheRuntimePayload, getPanelSyncPayload, getPanelSyncSummary } from './panel-sync-cache.js';
+import { slimEpochForScenarioSync } from '../shared/slim-epoch.js';
 
 const CHANNEL = 'StateScopeExtension';
 const MIN_EPOCH_RELAY_MS = 250;
@@ -17,6 +18,27 @@ function isRelayBroken() {
   }
 }
 
+/** 中继到扩展：瘦身，否则大 diffs 会撑爆 chrome.runtime.sendMessage */
+function toRelayEpoch(epochPayload) {
+  const slim = slimEpochForScenarioSync(epochPayload);
+  if (!slim) {
+    return null;
+  }
+  const logicDiffs = (epochPayload.diffs || [])
+    .filter((row) => row?.severity === 'logic-mismatch')
+    .slice(0, 40)
+    .map((row) => ({
+      path: row.path,
+      severity: row.severity,
+      stateType: row.stateType,
+      old: row.old,
+      new: row.new,
+      oldLabel: row.oldLabel,
+      newLabel: row.newLabel
+    }));
+  return { ...slim, diffs: logicDiffs };
+}
+
 export function postToExtension(type, payload) {
   if (isRelayBroken()) {
     return false;
@@ -28,7 +50,7 @@ export function postToExtension(type, payload) {
         type,
         payload
       },
-      '*'
+      window.location.origin
     );
     return true;
   } catch {
@@ -45,7 +67,10 @@ function flushPendingEpoch() {
   const payload = pendingEpochPayload;
   pendingEpochPayload = null;
   lastEpochRelayAt = Date.now();
-  postToExtension('SS_EPOCH', payload);
+  const relay = toRelayEpoch(payload);
+  if (relay) {
+    postToExtension('SS_EPOCH', relay);
+  }
 }
 
 export function publishEpochToPanel(epochPayload) {
@@ -57,7 +82,10 @@ export function publishEpochToPanel(epochPayload) {
   const now = Date.now();
   if (now - lastEpochRelayAt >= MIN_EPOCH_RELAY_MS) {
     lastEpochRelayAt = now;
-    postToExtension('SS_EPOCH', epochPayload);
+    const relay = toRelayEpoch(epochPayload);
+    if (relay) {
+      postToExtension('SS_EPOCH', relay);
+    }
     return;
   }
 
@@ -91,7 +119,10 @@ export function republishCachedPanelState() {
   }
 
   for (const epochPayload of [...epochs].reverse()) {
-    postToExtension('SS_EPOCH', epochPayload);
+    const relay = toRelayEpoch(epochPayload);
+    if (relay) {
+      postToExtension('SS_EPOCH', relay);
+    }
   }
 
   return {

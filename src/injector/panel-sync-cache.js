@@ -38,6 +38,7 @@ export function getPanelSyncSummary() {
       counts: item.counts,
       diffSummary: item.diffSummary,
       hasNewChain: item.hasNewChain,
+      scenarioTag: item.scenarioTag || '',
       meta: item.meta
     }))
   };

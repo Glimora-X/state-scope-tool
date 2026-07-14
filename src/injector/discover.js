@@ -317,44 +317,80 @@ function viewModelMatchesBoName(viewModel, expectedBoName) {
   return resolveBoNameFromViewModel(viewModel) === expectedBoName;
 }
 
-/** MDF 官方：window.mdf = appManager，cur = 当前可见 ContainerModel */
-function discoverLowcodeViewModelFromAppManager(expectedBoName = '') {
-  const mdf = window.mdf;
-  if (!mdf) {
-    return null;
+/** MDF 官方：window.mdf = appManager；兼容 top / 同源 iframe */
+function collectMdfAppManagerRoots() {
+  const roots = [];
+  const push = (mdf) => {
+    if (mdf && !roots.includes(mdf)) {
+      roots.push(mdf);
+    }
+  };
+
+  try {
+    push(window.mdf);
+  } catch {
+    // ignore
   }
 
+  try {
+    if (window.top && window.top !== window) {
+      push(window.top.mdf);
+    }
+  } catch {
+    // cross-origin top
+  }
+
+  try {
+    for (let i = 0; i < window.frames.length; i += 1) {
+      try {
+        push(window.frames[i]?.mdf);
+      } catch {
+        // cross-origin frame
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return roots;
+}
+
+/** MDF 官方：window.mdf = appManager，cur = 当前可见 ContainerModel */
+function discoverLowcodeViewModelFromAppManager(expectedBoName = '') {
   const candidates = [];
+
   const push = (vm) => {
     if (vm && !candidates.includes(vm)) {
       candidates.push(vm);
     }
   };
 
-  try {
-    push(mdf.cur);
-  } catch {
-    // ignore
-  }
-
-  try {
-    if (typeof mdf.get === 'function') {
-      for (let i = 0; i < 5; i += 1) {
-        push(mdf.get(i));
-      }
+  for (const mdf of collectMdfAppManagerRoots()) {
+    try {
+      push(mdf.cur);
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
-  }
 
-  try {
-    if (mdf.viewInstances instanceof Map) {
-      for (const vm of mdf.viewInstances.values()) {
-        push(vm);
+    try {
+      if (typeof mdf.get === 'function') {
+        for (let i = 0; i < 5; i += 1) {
+          push(mdf.get(i));
+        }
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
+
+    try {
+      if (mdf.viewInstances instanceof Map) {
+        for (const vm of mdf.viewInstances.values()) {
+          push(vm);
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
 
   for (const vm of candidates) {
@@ -657,6 +693,16 @@ export function discoverRuntimeTargets(options = {}) {
 
 export function markWrapped(target) {
   target[WRAPPED] = true;
+}
+
+export function unmarkWrapped(target) {
+  if (target) {
+    try {
+      delete target[WRAPPED];
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export function isWrapped(target) {

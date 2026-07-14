@@ -19,7 +19,7 @@ import {
   saveJiraToken,
   saveSettings
 } from './settings-store.js';
-import { slimEpochForStorage } from '../shared/slim-epoch.js';
+import { normalizeEpochId, slimEpochForStorage } from '../shared/slim-epoch.js';
 
 const MAX_EPOCHS = 30;
 const tabStore = new Map();
@@ -70,6 +70,18 @@ function ensureScenarioCatalog(state, boName, { force = false } = {}) {
 
   const bundled = resolveBundledScenarioPack(targetBo);
   if (!bundled) {
+    if (state.scenarioCatalogPack?.boName === targetBo && state.scenarioCatalogPack.scenarios?.length) {
+      return {
+        ok: true,
+        applied: false,
+        reason: 'uploaded-catalog',
+        boName: state.scenarioCatalogPack.boName,
+        version: state.scenarioCatalogPack.version,
+        scenarioCount: state.scenarioCatalogPack.scenarios.length,
+        catalog: state.scenarioCatalogPack,
+        scenarioReport: state.scenarioReport
+      };
+    }
     // 清空错误 BO 的旧包，避免 OutsourceIssue 页残留销货单 checklist
     if (force || (state.scenarioCatalogPack?.boName && state.scenarioCatalogPack.boName !== targetBo)) {
       state.scenarioCatalogPack = null;
@@ -107,6 +119,7 @@ function emptyTabState(catalogPack) {
     cutoverReport: emptyCutoverReport(),
     scenarioCatalogPack: pack,
     scenarioReport: emptyScenarioReport(pack),
+    scenarioIgnoreEpochsBefore: 0,
     updatedAt: 0
   };
 }
@@ -121,12 +134,60 @@ function getTabState(tabId) {
 function rebuildDerivedReports(state) {
   let cutoverReport = emptyCutoverReport();
   let scenarioReport = emptyScenarioReport(state.scenarioCatalogPack);
+  const ignoreBefore = state.scenarioIgnoreEpochsBefore || state.scenarioReport?.ignoreEpochsBefore || 0;
+  scenarioReport.ignoreEpochsBefore = ignoreBefore;
   for (const epoch of [...state.epochs].reverse()) {
     cutoverReport = accumulateCutoverReport(cutoverReport, epoch);
     scenarioReport = accumulateScenarioReport(scenarioReport, epoch);
   }
   state.cutoverReport = cutoverReport;
   state.scenarioReport = scenarioReport;
+  state.scenarioIgnoreEpochsBefore = ignoreBefore;
+}
+
+function epochCountsTowardScenario(epoch, ignoreBefore) {
+  if (!epoch?.scenarioTag) {
+    return false;
+  }
+  if (ignoreBefore > 0 && (epoch.startedAt || 0) <= ignoreBefore) {
+    return false;
+  }
+  return true;
+}
+
+/** 按 tag 对齐：页面/SW 已有带 scenarioTag 的轮次，但场景累计偏少时重放 */
+function healScenarioReportFromEpochs(state) {
+  if (!state?.scenarioCatalogPack || !state.epochs?.length) {
+    return false;
+  }
+  const scenarios = state.scenarioReport?.scenarios || {};
+  if (!Object.keys(scenarios).length) {
+    rebuildDerivedReports(state);
+    return true;
+  }
+
+  const ignoreBefore = state.scenarioIgnoreEpochsBefore || state.scenarioReport?.ignoreEpochsBefore || 0;
+  const tagCounts = {};
+  for (const epoch of state.epochs) {
+    if (!epochCountsTowardScenario(epoch, ignoreBefore)) {
+      continue;
+    }
+    const tag = epoch.scenarioTag;
+    if (!scenarios[tag]) {
+      continue;
+    }
+    tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+  }
+
+  const needsRebuild = Object.entries(tagCounts).some(
+    ([tag, count]) => (scenarios[tag]?.epochCount || 0) < count
+  );
+  if (!needsRebuild) {
+    return false;
+  }
+
+  rebuildDerivedReports(state);
+  return true;
 }
 
 async function bulkSyncTabState(tabId, { runtime, epochs }) {
@@ -135,10 +196,11 @@ async function bulkSyncTabState(tabId, { runtime, epochs }) {
     state.runtime = runtime;
   }
   if (Array.isArray(epochs) && epochs.length) {
-    const merged = new Map(state.epochs.map((item) => [item.id, item]));
+    const merged = new Map(state.epochs.map((item) => [String(normalizeEpochId(item.id)), item]));
     for (const epoch of epochs) {
       if (epoch?.id != null) {
-        merged.set(epoch.id, slimEpochForStorage(epoch));
+        const slim = slimEpochForStorage(epoch);
+        merged.set(String(slim.id), slim);
       }
     }
     state.epochs = [...merged.values()]
@@ -147,7 +209,7 @@ async function bulkSyncTabState(tabId, { runtime, epochs }) {
     const latestId = state.epochs[0]?.id ?? null;
     const selectedStillExists =
       state.selectedEpochId != null &&
-      state.epochs.some((item) => item.id == state.selectedEpochId);
+      state.epochs.some((item) => String(item.id) === String(state.selectedEpochId));
     if (latestId != null && !selectedStillExists) {
       state.selectedEpochId = latestId;
     }
@@ -160,10 +222,14 @@ async function bulkSyncTabState(tabId, { runtime, epochs }) {
 async function pushEpoch(tabId, payload) {
   const state = getTabState(tabId);
   const slim = slimEpochForStorage(payload);
+  const slimIdKey = String(slim.id);
   const prevLatestId = state.epochs[0]?.id ?? null;
   const wasFollowingLatest =
-    state.selectedEpochId == null || state.selectedEpochId == prevLatestId;
-  state.epochs = [slim, ...state.epochs.filter((item) => item.id !== slim.id)].slice(0, MAX_EPOCHS);
+    state.selectedEpochId == null || String(state.selectedEpochId) === String(prevLatestId);
+  state.epochs = [slim, ...state.epochs.filter((item) => String(item.id) !== slimIdKey)].slice(
+    0,
+    MAX_EPOCHS
+  );
   if (wasFollowingLatest) {
     state.selectedEpochId = slim.id;
   }
@@ -172,7 +238,8 @@ async function pushEpoch(tabId, payload) {
   state.updatedAt = Date.now();
 
   const settings = await loadSettings();
-  const upserted = await collectIssuesFromEpoch(slim, tabId, settings);
+  // Issue 采集需要 diffs：用原始 payload，SW 只存 slim
+  const upserted = await collectIssuesFromEpoch(payload, tabId, settings);
 
   if (settings.jira?.enabled && settings.jira?.autoSync && upserted.length) {
     await syncIssuesBatch(upserted.map((item) => item.fingerprint));
@@ -232,7 +299,23 @@ function notifyPanelStateUpdated(tabId) {
   }
 }
 
+const INTERNAL_ONLY_TYPES = new Set([
+  'SS_SAVE_SETTINGS',
+  'SS_SAVE_JIRA_TOKEN',
+  'SS_CLEAR_JIRA_TOKEN',
+  'SS_TEST_JIRA',
+  'SS_BATCH_SYNC_JIRA',
+  'SS_DELETE_ISSUE',
+  'SS_UPDATE_ISSUE',
+  'SS_PROMOTE_ISSUE'
+]);
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (INTERNAL_ONLY_TYPES.has(message.type) && sender.tab) {
+    sendResponse({ ok: false, error: '敏感操作仅限扩展内部页面' });
+    return true;
+  }
+
   const tabId = sender.tab?.id ?? message.tabId;
 
   const run = async () => {
@@ -245,7 +328,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'SS_RUNTIME' && sender.tab?.id != null) {
       const state = getTabState(sender.tab.id);
       state.runtime = message.payload;
-      ensureScenarioCatalog(state, message.payload?.meta?.boName);
+      const boName = message.payload?.meta?.boName;
+
+      const pageCatalog = message.payload?.scenarioCatalogPack;
+      if (pageCatalog?.scenarios?.length && pageCatalog.boName) {
+        const hasCatalog = hasMatchingScenarioCatalog(state, pageCatalog.boName);
+        if (!hasCatalog) {
+          const pack = normalizeScenarioPack(pageCatalog);
+          if (pack) {
+            state.scenarioCatalogPack = pack;
+            if (state.epochs?.length) {
+              rebuildDerivedReports(state);
+            } else {
+              state.scenarioReport = emptyScenarioReport(pack);
+            }
+          }
+        }
+      }
+
+      ensureScenarioCatalog(state, boName);
       state.updatedAt = Date.now();
       notifyPanelStateUpdated(sender.tab.id);
       return { ok: true };
@@ -256,6 +357,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const state = targetTabId != null ? getTabState(targetTabId) : emptyTabState();
       if (targetTabId != null) {
         ensureScenarioCatalog(state, state.runtime?.meta?.boName);
+        healScenarioReportFromEpochs(state);
       }
       const issues = await listIssues();
       const settings = await getSettingsForPanel();
@@ -267,6 +369,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           selectedEpochId: state.selectedEpochId,
           cutoverReport: state.cutoverReport,
           scenarioReport: state.scenarioReport,
+          scenarioCatalogPack: state.scenarioCatalogPack,
           issues,
           settings,
           updatedAt: state.updatedAt
@@ -283,7 +386,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return {
         ok: true,
         epochCount: state.epochs.length,
-        hasRuntime: !!state.runtime
+        hasRuntime: !!state.runtime,
+        scenarioReport: state.scenarioReport,
+        cutoverReport: state.cutoverReport,
+        scenarioCatalogPack: state.scenarioCatalogPack
       };
     }
 
@@ -305,10 +411,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.type === 'SS_RESET_SCENARIO_REPORT') {
       const state = getTabState(message.tabId);
-      state.scenarioReport = resetScenarioReport(state.scenarioReport, state.scenarioCatalogPack);
+      const next = resetScenarioReport(state.scenarioReport, state.scenarioCatalogPack);
+      state.scenarioIgnoreEpochsBefore = next.ignoreEpochsBefore || Date.now();
+      state.scenarioReport = next;
       state.updatedAt = Date.now();
       notifyPanelStateUpdated(message.tabId);
-      return { ok: true };
+      return { ok: true, scenarioReport: state.scenarioReport };
     }
 
     if (message.type === 'SS_BOOTSTRAP_SCENARIO_CATALOG') {
@@ -327,7 +435,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: false, error: '无效场景 catalog（需含 scenarios；支持领域 SSOT 或工具 L3）' };
       }
       state.scenarioCatalogPack = pack;
-      state.scenarioReport = emptyScenarioReport(pack);
+      // 先挂 catalog，再按已有 epochs 重放累计（避免「轮次已产生、场景仍尚未观测」）
+      if (state.epochs?.length) {
+        rebuildDerivedReports(state);
+      } else {
+        state.scenarioReport = emptyScenarioReport(pack);
+      }
       state.updatedAt = Date.now();
       notifyPanelStateUpdated(message.tabId);
       return {

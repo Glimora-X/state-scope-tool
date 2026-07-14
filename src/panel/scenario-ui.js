@@ -103,7 +103,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       return ctx.renderVerdict({
         status: 'error',
         headline: `BLOCK · ${activeRecord.label}`,
-        subline: `${activeRecord.blockedFields} 字段 logic-mismatch · Epoch ${activeRecord.epochCount}`
+        subline: `${activeRecord.blockedFields} 字段升级前后不一致 · 观测轮次 ${activeRecord.epochCount}`
       });
     }
     if (activeRecord?.status === 'pass') {
@@ -158,7 +158,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
           ${completeMark ? `<span class="subtle">${completeMark}</span>` : ''}
         </div>
         <div class="subtle">${ctx.esc(item.checkpoint)}</div>
-        <div class="subtle">Epoch ${record.epochCount || 0}${record.logicMismatchCount ? ` · mismatch ${record.logicMismatchCount}` : ''}</div>
+        <div class="subtle">观测轮次 ${record.epochCount || 0}${record.logicMismatchCount ? ` · 升级前后不一致 ${record.logicMismatchCount}` : ''}</div>
       </button>`;
       })
       .join('');
@@ -224,7 +224,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
           <td><div class="field-name">${ctx.esc(field.path)}</div><div class="field-path">${ctx.esc(field.stateType)}</div></td>
           <td>${field.epochCount}</td>
           <td>${field.logicMismatchCount}</td>
-          <td>${field.scenarioReady ? '<span class="chip on">READY</span>' : `<span class="chip off">${ctx.esc(field.blockReason || '—')}</span>`}</td>
+          <td>${field.scenarioReady ? '<span class="chip on">就绪</span>' : `<span class="chip off">${ctx.esc(field.blockReason || '—')}</span>`}</td>
         </tr>`
           )
           .join('')
@@ -241,18 +241,19 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         <span class="chip ${statusChip(record.status)}">${statusLabel(record.status)}</span>
       </div>
       <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Epoch</div><div class="kpi-value">${record.epochCount}</div></div>
-        <div class="kpi"><div class="kpi-label">READY</div><div class="kpi-value">${record.readyFields}/${record.allowlistFieldCount}</div></div>
-        <div class="kpi"><div class="kpi-label">Mismatch</div><div class="kpi-value">${record.logicMismatchCount}</div></div>
+        <div class="kpi"><div class="kpi-label">观测轮次</div><div class="kpi-value">${record.epochCount}</div></div>
+        <div class="kpi"><div class="kpi-label">就绪</div><div class="kpi-value">${record.readyFields}/${record.allowlistFieldCount}</div></div>
+        <div class="kpi"><div class="kpi-label">升级前后不一致</div><div class="kpi-value">${record.logicMismatchCount}</div></div>
       </div>
       ${renderSteps(ctx, record, meta)}
       <div class="toolbar">
         <button type="button" class="btn primary" id="mark-scenario-complete" ${canMark ? '' : 'disabled'}>${markLabel}</button>
         <button type="button" class="btn" id="use-as-active-scenario">设为当前测试场景</button>
+        <button type="button" class="btn" id="force-sample-epoch" title="单据已在目标态但未触发业务动作时，手动采一帧写入观测轮次">采样当前状态</button>
       </div>
       <div class="cutover-table-wrap">
         <table class="cutover-table">
-          <thead><tr><th>字段</th><th>Epoch</th><th>Mismatch</th><th>结果</th></tr></thead>
+          <thead><tr><th>字段</th><th>观测轮次</th><th>升级前后不一致</th><th>结果</th></tr></thead>
           <tbody>${fields}</tbody>
         </table>
       </div>
@@ -273,7 +274,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       <label>当前测试场景
         <select id="scenario-select"><option value="">— 选择 —</option>${options}</select>
       </label>
-      <span class="subtle">${tag ? `Epoch 将计入「${ctx.esc(activeLabel)}」` : '未选场景时 Epoch 不计入场景回归'}</span>
+      <span class="subtle">${tag ? `观测轮次将计入「${ctx.esc(activeLabel)}」` : '未选场景时观测轮次不计入场景回归'}</span>
       ${tagMismatch ? `<span class="chip off">左侧查看「${ctx.esc(viewingLabel)}」但未设为当前场景</span>` : ''}
     </div>`;
   }
@@ -292,7 +293,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         ''
       : `<div class="banner warn">
         <strong>必须上传领域场景 SSOT</strong>，工具不会为低代码 BO 内置副本（避免领域改文件后工具不同步）。
-        <br/>请导入业务仓 <code>*.scenarios.v1.json</code>（如 <code>outsourceIssue.scenarios.v1.json</code>）。
+        <br/>请导入业务仓 <code>*.scenarios.v1.json</code>（如 <code>outsourceIssue.scenarios.v1.json</code> / <code>outsourceStockin.scenarios.v1.json</code>）。
         仅销货单 GoodsIssue 仍可点「加载内置场景」。
       </div>`;
     const emptyHint =
@@ -321,7 +322,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       <button type="button" class="btn" id="export-scenario-csv">导出场景报告 CSV</button>
       <button type="button" class="btn" id="reset-scenario-report">重置场景累计</button>
     </div>
-    <div class="banner info">领域 SSOT 直接可用（id/setup/assertFields）。PASS：shadow/new 轨已观测 + watch 字段无 logic-mismatch。</div>`;
+    <div class="banner info">领域 SSOT 直接可用（id/setup/assertFields）。通过条件：升级后（影子）已观测 + watch 字段无升级前后不一致。</div>`;
   }
 
   async function writeScenarioToPage(ctx, tag) {
@@ -338,8 +339,6 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
     document.getElementById('scenario-select')?.addEventListener('change', async (event) => {
       await writeScenarioToPage(ctx, event.target.value);
       ctx.ui.selectedScenarioTag = event.target.value || ctx.ui.selectedScenarioTag;
-      ctx.renderApp();
-      ctx.bindAppEvents();
       await ctx.refresh?.({ force: true });
     });
 
@@ -348,8 +347,6 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         const tag = el.getAttribute('data-select-scenario');
         ctx.ui.selectedScenarioTag = tag;
         await writeScenarioToPage(ctx, tag);
-        ctx.renderApp();
-        ctx.bindAppEvents();
         const label = findChecklistItem(ctx, tag)?.label || tag;
         ctx.showToast(`当前场景：${label}`);
         await ctx.refresh?.({ force: true });
@@ -359,10 +356,33 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
     document.getElementById('use-as-active-scenario')?.addEventListener('click', async () => {
       const tag = getSelectedScenario(ctx);
       await writeScenarioToPage(ctx, tag);
-      ctx.renderApp();
-      ctx.bindAppEvents();
       const label = findChecklistItem(ctx, tag)?.label || tag;
       ctx.showToast(`当前场景：${label}`);
+      await ctx.refresh?.({ force: true });
+    });
+
+    document.getElementById('force-sample-epoch')?.addEventListener('click', async () => {
+      const tag = getSelectedScenario(ctx);
+      if (tag) {
+        await writeScenarioToPage(ctx, tag);
+      }
+      const sample = await ctx.evalInPage(`(function () {
+        var ss = window.__StateScope__;
+        if (!ss) {
+          try { ss = window.top && window.top.__StateScope__; } catch (e) {}
+        }
+        if (!ss || !ss.forceLowcodeSample) {
+          return { ok: false, error: 'injector 未就绪' };
+        }
+        return ss.forceLowcodeSample('manual-sample');
+      })()`);
+      const result = sample?.result || sample;
+      if (result?.ok) {
+        ctx.showToast('已采样当前状态，写入观测轮次');
+        await ctx.refresh?.({ force: true });
+      } else {
+        ctx.showToast(result?.error || sample?.error || '采样失败');
+      }
     });
 
     document.getElementById('mark-scenario-complete')?.addEventListener('click', async () => {
@@ -412,16 +432,25 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         return;
       }
       try {
-        const catalog = JSON.parse(await file.text());
+        const rawText = (await file.text()).replace(/^\uFEFF/, '');
+        const catalog = JSON.parse(rawText);
         if (!catalog?.scenarios?.length) {
-          ctx.showToast('无效 SSOT：缺少 scenarios 数组');
+          ctx.showToast(
+            catalog?.fields?.length ?
+              '这是 allowlist 文件，请到「设置」上传 allowlist；场景包需含 scenarios 数组'
+            : '无效 SSOT：缺少 scenarios 数组'
+          );
+          return;
+        }
+        if (!catalog.boName) {
+          ctx.showToast('无效 SSOT：缺少 boName 字段');
           return;
         }
         const result = await ctx.syncScenarioCatalog({ force: true, catalog });
         ctx.showToast(
           result?.ok ?
-            `已导入 ${result.scenarioCount || catalog.scenarios?.length || 0} 个场景（${catalog.boName || 'SSOT'}）`
-          : result?.error || '导入失败'
+            `已导入 ${result.scenarioCount || catalog.scenarios?.length || 0} 个场景（${catalog.boName}）`
+          : result?.error || result?.reason || '导入失败'
         );
         await ctx.refresh({ force: true });
       } catch (error) {
@@ -444,9 +473,19 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
     });
 
     document.getElementById('reset-scenario-report')?.addEventListener('click', async () => {
-      await chrome.runtime.sendMessage({ type: 'SS_RESET_SCENARIO_REPORT', tabId: ctx.tabId });
-      await ctx.refresh();
-      ctx.showToast('已重置场景累计');
+      const response = await chrome.runtime.sendMessage({
+        type: 'SS_RESET_SCENARIO_REPORT',
+        tabId: ctx.tabId
+      });
+      if (response?.ok && response.scenarioReport && ctx.appState) {
+        ctx.appState.scenarioReport = response.scenarioReport;
+      }
+      // 强制下一轮用新水位重算
+      if (typeof ctx.clearScenarioFromEpochsKey === 'function') {
+        ctx.clearScenarioFromEpochsKey();
+      }
+      await ctx.refresh?.({ force: true });
+      ctx.showToast('已重置场景累计（历史轮次仍保留，仅之后操作重新计入）');
     });
   }
 

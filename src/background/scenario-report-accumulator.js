@@ -50,6 +50,8 @@ export function emptyScenarioReport(catalogPack) {
     catalogTitle: normalized?.title || null,
     allowlistVersion: normalized?.allowlistVersion || null,
     hasNewChainObserved: false,
+    /** 重置场景累计后，只认该时间戳之后的观测轮次 */
+    ignoreEpochsBefore: 0,
     updatedAt: 0,
     summary: recomputeSummary(scenarios),
     scenarios
@@ -109,12 +111,12 @@ function seedWatchFieldRecords(record) {
 function recomputeFieldReady(record, hasNewChainObserved) {
   if (!hasNewChainObserved) {
     record.scenarioReady = false;
-    record.blockReason = 'new 轨未接入';
+    record.blockReason = '影子未写入';
     return;
   }
   if (record.logicMismatchCount > 0) {
     record.scenarioReady = false;
-    record.blockReason = `logic-mismatch × ${record.logicMismatchCount}`;
+    record.blockReason = `升级前后不一致 × ${record.logicMismatchCount}`;
     return;
   }
   if (record.epochCount === 0) {
@@ -186,7 +188,12 @@ export function accumulateScenarioReport(report, epoch) {
     report = emptyScenarioReport();
   }
 
-  const tag = epoch.scenarioTag;
+  const ignoreBefore = report.ignoreEpochsBefore || 0;
+  if (ignoreBefore > 0 && (epoch?.startedAt || 0) <= ignoreBefore) {
+    return report;
+  }
+
+  const tag = typeof epoch.scenarioTag === 'string' ? epoch.scenarioTag.trim() : epoch.scenarioTag;
   if (!tag || !report.scenarios[tag]) {
     if (epoch.hasNewChain) {
       report.hasNewChainObserved = true;
@@ -265,27 +272,31 @@ export function markScenarioComplete(report, scenarioTag, complete = true) {
 }
 
 export function resetScenarioReport(report, catalogPack) {
-  if (catalogPack) {
-    return emptyScenarioReport(catalogPack);
-  }
-  return emptyScenarioReport(
-    report?.catalogVersion ?
-      {
-        boName: report.boName,
-        version: report.catalogVersion,
-        title: report.catalogTitle,
-        scenarios: Object.values(report.scenarios || {}).map((item) => ({
-          tag: item.tag,
-          label: item.label,
-          group: item.group,
-          checkpoint: item.checkpoint,
-          signOffMode: item.signOffMode,
-          watchFields: item.watchFields,
-          steps: item.steps
-        }))
-      }
-    : null
-  );
+  const ignoreEpochsBefore = Date.now();
+  const next =
+    catalogPack ?
+      emptyScenarioReport(catalogPack)
+    : emptyScenarioReport(
+        report?.catalogVersion ?
+          {
+            boName: report.boName,
+            version: report.catalogVersion,
+            title: report.catalogTitle,
+            scenarios: Object.values(report.scenarios || {}).map((item) => ({
+              tag: item.tag,
+              label: item.label,
+              group: item.group,
+              checkpoint: item.checkpoint,
+              signOffMode: item.signOffMode,
+              watchFields: item.watchFields,
+              steps: item.steps
+            }))
+          }
+        : null
+      );
+  next.ignoreEpochsBefore = ignoreEpochsBefore;
+  next.updatedAt = ignoreEpochsBefore;
+  return next;
 }
 
 export function getScenarioVerdict(report, activeTag) {
@@ -293,7 +304,7 @@ export function getScenarioVerdict(report, activeTag) {
     return {
       status: 'idle',
       headline: '场景回归未开始',
-      subline: '选择场景并操作单据，allowlist 字段将按场景累计'
+      subline: '选择场景并操作单据，字段清单将按场景累计'
     };
   }
 
@@ -301,8 +312,8 @@ export function getScenarioVerdict(report, activeTag) {
   if (summary.block > 0) {
     return {
       status: 'error',
-      headline: `BLOCK · ${summary.block} 个场景存在 logic-mismatch`,
-      subline: `PASS ${summary.pass}/${summary.total} · 已签字 ${summary.markedComplete}`
+      headline: `阻塞 · ${summary.block} 个场景存在升级前后不一致`,
+      subline: `通过 ${summary.pass}/${summary.total} · 已签字 ${summary.markedComplete}`
     };
   }
 
@@ -311,7 +322,7 @@ export function getScenarioVerdict(report, activeTag) {
     if (active.status === 'pass') {
       return {
         status: 'ok',
-        headline: `本场景 PASS · ${active.label}`,
+        headline: `本场景通过 · ${active.label}`,
         subline:
           active.signOffMode === 'manual' ?
             'manual 场景已签字'
@@ -321,15 +332,15 @@ export function getScenarioVerdict(report, activeTag) {
     if (active.status === 'block') {
       return {
         status: 'error',
-        headline: `本场景 BLOCK · ${active.label}`,
-        subline: `${active.blockedFields} 个字段 logic-mismatch`
+        headline: `本场景阻塞 · ${active.label}`,
+        subline: `${active.blockedFields} 个字段升级前后不一致`
       };
     }
     if (active.status === 'in_progress') {
       return {
         status: 'warn',
         headline: `进行中 · ${active.label}`,
-        subline: `已观测 ${active.epochCount} 个 Epoch`
+        subline: `已观测 ${active.epochCount} 个观测轮次`
       };
     }
   }

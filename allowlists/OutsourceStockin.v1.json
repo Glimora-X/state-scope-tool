@@ -1,0 +1,37 @@
+{
+  "boName": "OutsourceStockin",
+  "version": "v1",
+  "note": "委外入库单 Phase 1 allowlist · SSOT: cc-front-biz-app-service-scm outsourceStockin.allowlist.v1.json",
+  "fields": [
+    {
+      "path": "main.currencyId",
+      "stateType": "disabled",
+      "configKey": "outsourceStockin",
+      "oldEntry": "EditAbleRules.ts · currencyId"
+    },
+    {
+      "path": "main.exchangeRate",
+      "stateType": "disabled",
+      "configKey": "outsourceStockin",
+      "oldEntry": "EditAbleRules.ts · exchangeRate"
+    },
+    {
+      "path": "main.redBlueFlagEnum",
+      "stateType": "disabled",
+      "configKey": "outsourceStockin",
+      "oldEntry": "EditAbleRules.ts · redBlueFlagEnum"
+    },
+    {
+      "path": "main.vendorId",
+      "stateType": "disabled",
+      "configKey": "outsourceStockin",
+      "oldEntry": "EditAbleRules.ts · vendorId"
+    },
+    {
+      "path": "detailList.{uuid}.warehouseId",
+      "stateType": "disabled",
+      "configKey": "outsourceStockin",
+      "oldEntry": "EditAbleRules.ts · warehouseId"
+    }
+  ]
+}

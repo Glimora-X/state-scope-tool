@@ -1,4 +1,5 @@
 import { formatVal } from './snap-view.js';
+import { severityZh } from '../shared/zh-labels.js';
 
 export function buildAllowlistPathSet(config) {
   const set = new Set();
@@ -82,12 +83,12 @@ export function buildAllowlistFieldResults(config, diffs, hasNewChain) {
         severity = diff.severity === 'logic-mismatch' ? 'logic-mismatch' : 'pending';
         oldLabel = formatVal(diff.old);
         newLabel = '—';
-        resultLabel = severity === 'logic-mismatch' ? 'logic-mismatch' : '待接入';
+        resultLabel = severity === 'logic-mismatch' ? severityZh('logic-mismatch') : severityZh('pending');
       } else {
         severity = diff.severity || 'ok';
         oldLabel = formatVal(diff.old);
         newLabel = formatVal(diff.new);
-        resultLabel = severity;
+        resultLabel = severityZh(severity);
       }
     }
 

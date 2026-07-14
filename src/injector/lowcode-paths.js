@@ -35,12 +35,37 @@ export function buildLowcodeDetailPath(bodyName, rowKey, fieldName, stateType = 
   return `${body}.${row}.${fieldName}.${stateType}`;
 }
 
+/**
+ * getDisable(name, index, grid) → snap key。
+ * 明细行优先 uuid（与 shadowStore / biz-core 一致），避免 detailList.0 vs detailList.{uuid} 双条。
+ */
 export function buildLowcodePathFromGetDisable(name, index, obj, stateType = 'disabled') {
   if (index == null || index === undefined) {
     return buildLowcodeMainPath(name, stateType);
   }
-  const bodyName = obj?.name || obj?.bodyName || obj?.tableName || 'detailList';
-  return buildLowcodeDetailPath(bodyName, index, name, stateType);
+  const bodyName =
+    obj?.name || obj?.get?.('name') || obj?.bodyName || obj?.tableName || 'detailList';
+  let rowKey = index;
+  try {
+    const rowData =
+      (Array.isArray(obj?.data) ? obj.data[index] : null) ||
+      (typeof obj?.getRow === 'function' ? obj.getRow(index) : null) ||
+      (typeof obj?.getRowItem === 'function' ? obj.getRowItem(index)?.data || obj.getRowItem(index) : null);
+    if (rowData && typeof rowData === 'object') {
+      rowKey = resolveRowKeyFromModel(
+        {
+          get: (k) => rowData[k],
+          uuid: rowData.uuid,
+          rowUuid: rowData.rowUuid,
+          id: rowData.id
+        },
+        index
+      );
+    }
+  } catch {
+    // keep index
+  }
+  return buildLowcodeDetailPath(bodyName, rowKey, name, stateType);
 }
 
 export function resolveRowKeyFromModel(model, fallbackIndex) {

@@ -1,5 +1,6 @@
 import { captureStatePatchesAsSnap } from './normalize.js';
-import { isWrapped, markWrapped } from './discover.js';
+import { isWrapped, markWrapped, unmarkWrapped } from './discover.js';
+import { registerHook, markTriggered } from './hook-registry.js';
 import { collectOldEntriesFromChangeData } from './wrap-old.js';
 import {
   collectDetailFinalStates,
@@ -15,12 +16,15 @@ export function wrapFormController(formController, epochManager) {
     return false;
   }
 
-  const original = formController.refreshView?.bind(formController);
-  if (typeof original !== 'function') {
+  const rawRefreshView = formController.refreshView;
+  if (typeof rawRefreshView !== 'function') {
     return false;
   }
 
-  formController.refreshView = function refreshViewWrapped(changedFields, validateInfo, statePatches) {
+  const original = rawRefreshView.bind(formController);
+
+  const wrapped = function refreshViewWrapped(changedFields, validateInfo, statePatches) {
+    markTriggered('refreshView');
     const uiState = formController.presenter?.controllers?.uiStateController;
     const presenter = formController.presenter;
 
@@ -61,6 +65,19 @@ export function wrapFormController(formController, epochManager) {
     epochManager.commitEpoch();
     return response;
   };
+  formController.refreshView = wrapped;
+
+  registerHook({
+    name: 'refreshView',
+    target: formController,
+    methodName: 'refreshView',
+    original: rawRefreshView,
+    wrapped,
+    onUnwrap() {
+      formController.refreshView = rawRefreshView;
+      unmarkWrapped(formController);
+    }
+  });
 
   markWrapped(formController);
 

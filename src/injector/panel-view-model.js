@@ -1,5 +1,7 @@
 import { classifyDetailRowKey } from './legacy-diagnostics.js';
 
+import { severityZh, SHADOW_STORE_MISSING } from '../shared/zh-labels.js';
+
 export function formatEpochTime(ts) {
   if (!ts) {
     return '—';
@@ -69,31 +71,31 @@ export function buildEpochHealth(epoch) {
   if (mismatch > 0) {
     return {
       status: 'error',
-      headline: `发现 ${mismatch} 个逻辑差异`,
-      subline: 'old 与 new 状态不一致，优先排查'
+      headline: `发现 ${mismatch} 个升级前后不一致`,
+      subline: '升级前与升级后状态不一致，优先排查'
     };
   }
 
   if (hasNew) {
     return {
       status: 'ok',
-      headline: '本次双轨一致',
-      subline: changed ? `${changed} 个变更字段均已对齐` : '无变更字段'
+      headline: '本次无升级前后冲突',
+      subline: changed ? `${changed} 个变更字段（含未升级项时需看对比明细）` : '无变更字段'
     };
   }
 
   if (changed > 0) {
     return {
       status: 'warn',
-      headline: `已捕获 ${changed} 个变更字段`,
-      subline: 'new 轨未接入，Diff 为 old 预览'
+      headline: SHADOW_STORE_MISSING.headline,
+      subline: `${changed} 个变更 · ${SHADOW_STORE_MISSING.subline}`
     };
   }
 
   return {
     status: 'idle',
     headline: '本次无字段变更',
-    subline: 'Epoch 已记录，可继续操作单据'
+    subline: '观测轮次已记录，可继续操作单据'
   };
 }
 
@@ -137,8 +139,8 @@ export function buildAnomalies(epoch) {
     message:
       row.severity === 'logic-mismatch' ?
         `${row.oldLabel || '—'} → ${row.newLabel || '—'}`
-      : `${row.oldLabel || '—'}（new 待接入）`,
-    resultLabel: row.resultLabel || row.severity
+      : `${row.oldLabel || '—'}（${SHADOW_STORE_MISSING.short}）`,
+    resultLabel: severityZh(row.resultLabel || row.severity)
   }));
 }
 

@@ -2,10 +2,12 @@
   "name": "state-scope-tool",
   "version": "0.5.0",
   "private": true,
+  "type": "module",
   "description": "StateScope · 单据状态 L2 shadow 透视 Chrome 扩展（P1.5 场景回归）",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "watch": "node scripts/build.mjs --watch"
+    "watch": "node scripts/build.mjs --watch",
+    "test": "node --test src/injector/lowcode-sample.test.js"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

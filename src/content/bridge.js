@@ -4,6 +4,11 @@
   }
   window.__stateScopeRelayInstalled__ = true;
 
+  var RELAY_ALLOWED_TYPES = {
+    SS_EPOCH: true,
+    SS_RUNTIME: true
+  };
+
   let relayOpen = true;
   let relayWarned = false;
 
@@ -32,7 +37,7 @@
           type,
           error: error || ''
         },
-        '*'
+        window.location.origin
       );
     } catch {
       // ignore
@@ -56,6 +61,11 @@
     }
     const data = event.data;
     if (!data || data.channel !== 'StateScopeExtension') {
+      return;
+    }
+
+    if (!RELAY_ALLOWED_TYPES[data.type]) {
+      console.warn('[StateScope] relay blocked unknown type:', data.type);
       return;
     }
 
@@ -93,7 +103,7 @@
 })();
 
 (function loadDefaultAllowlist() {
-  const ALL_FILES = ['OutsourceIssue.v1.json', 'GoodsIssue.v1.json'];
+  const ALL_FILES = ['OutsourceStockin.v1.json', 'OutsourceIssue.v1.json', 'GoodsIssue.v1.json'];
   let loading = false;
   const deliveredBoNames = new Set();
 
@@ -114,6 +124,9 @@
       }
       if (/outsourceIssue/i.test(href)) {
         return 'OutsourceIssue';
+      }
+      if (/outsourceStockin/i.test(href)) {
+        return 'OutsourceStockin';
       }
       if (/goodsIssue/i.test(href)) {
         return 'GoodsIssue';
@@ -143,7 +156,7 @@
       }
     }
 
-    window.postMessage({ channel: 'StateScopeAllowlist', config }, '*');
+    window.postMessage({ channel: 'StateScopeAllowlist', config }, window.location.origin);
   }
 
   function orderedCandidates() {

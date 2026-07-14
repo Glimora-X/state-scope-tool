@@ -18,6 +18,7 @@ export function storeEpoch(epoch, meta) {
     id: epoch.id,
     trigger: epoch.trigger,
     phase: epoch.phase,
+    scenarioTag: epoch.scenarioTag || '',
     scope: epoch.scope,
     meta,
     changedSample: { ...epoch.changedSample },

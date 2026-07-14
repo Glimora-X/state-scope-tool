@@ -8,6 +8,15 @@ const SEVERITY = {
   NEW_ONLY: 'new-only'
 };
 
+/**
+ * 对比两份快照并输出逐字段差异。
+ *
+ * 调用方传入的实际内容因 profile 而异：
+ * - traditional：oldSnap = 操作前状态，newSnap = 升级后链路终态
+ * - lowcode：oldSnap = 可见态（finalSnap / visibleSnap），newSnap = 影子态（shadowSnap）
+ *
+ * 本函数不感知 profile，仅做纯数据比对。
+ */
 export function diffSnapshots(oldSnap, newSnap, allowlist) {
   const keys = new Set([...Object.keys(oldSnap || {}), ...Object.keys(newSnap || {})]);
   const diffs = [];

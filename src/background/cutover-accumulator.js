@@ -36,12 +36,12 @@ function fieldRecordFromRow(row) {
 function recomputeFieldReady(record, hasNewChainObserved) {
   if (!hasNewChainObserved) {
     record.cutoverReady = false;
-    record.blockReason = 'new 轨未接入';
+    record.blockReason = '影子未写入';
     return;
   }
   if (record.logicMismatchCount > 0) {
     record.cutoverReady = false;
-    record.blockReason = `logic-mismatch × ${record.logicMismatchCount}`;
+    record.blockReason = `升级前后不一致 × ${record.logicMismatchCount}`;
     return;
   }
   if (record.epochCount === 0) {

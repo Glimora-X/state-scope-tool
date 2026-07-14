@@ -8,7 +8,7 @@
   <body>
     <header class="app-header">
       <div class="brand-wrap">
-        <span class="brand-mark">SS</span>
+        <img class="brand-logo" src="../../assets/icons/logo-56.png" alt="StateScope" width="36" height="36" />
         <span class="brand">StateScope</span>
         <span id="activation-badge" class="status-badge">—</span>
       </div>
@@ -18,8 +18,8 @@
       <aside class="sidebar">
         <nav class="sidebar-nav" id="sidebar-nav">
           <button type="button" class="nav-item active" data-tab="overview">概览</button>
-          <button type="button" class="nav-item" data-tab="timeline">Epoch 时间线</button>
-          <button type="button" class="nav-item" data-tab="diff">Diff 对比</button>
+          <button type="button" class="nav-item" data-tab="timeline">观测时间线</button>
+          <button type="button" class="nav-item" data-tab="diff">升级前后对比</button>
           <button type="button" class="nav-item" data-tab="cutover">
             切流报告 <span class="nav-badge" id="cutover-nav-badge"></span>
           </button>
@@ -36,6 +36,7 @@
       <main id="app" class="main"></main>
     </div>
     <div id="toast" class="toast hidden"></div>
+    <script src="zh-labels.js"></script>
     <script src="scenario-ui.js"></script>
     <script src="issues-ui.js"></script>
     <script src="panel.js"></script>

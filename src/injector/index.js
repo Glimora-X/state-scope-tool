@@ -7,7 +7,7 @@ import {
   warnIfNonLocalhostActive
 } from './activate.js';
 import { detectProfile, getRuntimeMeta } from './detect.js';
-import { createEpochManager, reportEpochToConsole } from './console-reporter.js';
+import { createEpochManager, reportEpochToConsole, resetEpochCounter } from './console-reporter.js';
 import {
   discoverRuntimeTargets,
   isWrapped,
@@ -22,12 +22,22 @@ import {
   resolveLowcodeUiRoot,
   wrapLowcodeRuntime,
   commitLowcodeEpoch,
-  probeLowcodeShadow
+  probeLowcodeShadow,
+  resetBootstrapState,
+  getBootstrapStatus
 } from './wrap-lowcode.js';
+import { resetSession, getSessionToken } from './lowcode-buffer.js';
 import { setForcedProfileMode, getForcedProfileMode } from './profile-registry.js';
 import { getProfileDetection } from './detect.js';
 import { wrapFormController } from './wrap-consume.js';
 import { installDebugApi } from './debug-store.js';
+import {
+  getHookLiveness,
+  unwrapAll,
+  unwrapHook,
+  verifyHookIntegrity,
+  clearRegistry
+} from './hook-registry.js';
 import { scopeLog } from './safe-log.js';
 import { isConsoleOutputEnabled } from './path-filter.js';
 import { buildAllowlistPathSet } from './allowlist-config.js';
@@ -35,10 +45,13 @@ import { getBundledAllowlist } from './bundled-allowlists.js';
 import {
   applyScenarioCatalog,
   bootstrapScenarioCatalog,
+  bootstrapScenarioCatalogFromDom,
   getScenarioCatalog,
   getScenarioCatalogPack,
   getScenarioCatalogSummary,
+  getScenarioDiagnostics,
   getScenarioTag,
+  reconcileScenarioTagForBo,
   setScenarioTag
 } from './scenario-context.js';
 import { buildRuntimePayload } from './panel-payload.js';
@@ -49,13 +62,47 @@ const allowlistConfigCache = new Map();
 let epochManager = null;
 let runtimeContext = {};
 let installed = false;
+let apiInstalled = false;
 let hooksInstalled = false;
 let noDebugNoticeShown = false;
 let lastDiscoverAt = 0;
 
-const DISCOVER_INTERVAL_MS = 2000;
+function installScenarioCatalogBridge() {
+  if (window.__stateScopeScenarioCatalogBridge__) {
+    return;
+  }
+  window.__stateScopeScenarioCatalogBridge__ = true;
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) {
+      return;
+    }
+    const data = event.data;
+    if (data?.channel !== 'StateScopeScenarioCatalog' || !data.config) {
+      return;
+    }
+    const boName = data.config.boName || getRuntimeMeta(runtimeContext).boName;
+    if (applyScenarioCatalog(data.config, boName)) {
+      try {
+        document.documentElement.setAttribute(
+          'data-state-scope-scenario-catalog',
+          JSON.stringify(getScenarioCatalogPack(boName))
+        );
+      } catch {
+        // ignore
+      }
+      reconcileScenarioTagForBo(boName);
+    }
+  });
+}
+
+function bootstrapScenarioForRuntime(boName) {
+  bootstrapScenarioCatalog(boName);
+  bootstrapScenarioCatalogFromDom(boName);
+  return reconcileScenarioTagForBo(boName);
+}
 const POLL_INTERVAL_MS = 1000;
-const MAX_POLL_ATTEMPTS = 60;
+const MAX_POLL_ATTEMPTS = 120;
+const DISCOVER_INTERVAL_MS = 2000;
 
 function normalizeAllowlistConfig(config) {
   if (!config?.fields?.length) {
@@ -130,7 +177,7 @@ function applyAllowlistConfig(config) {
         boName: normalized.boName,
         version: normalized.version || ''
       },
-      '*'
+      window.location.origin
     );
   } catch {
     // ignore
@@ -186,7 +233,7 @@ function requestAllowlistFromBridge() {
     return;
   }
   try {
-    window.postMessage({ channel: 'StateScopeInternal', type: 'requestAllowlist' }, '*');
+    window.postMessage({ channel: 'StateScopeInternal', type: 'requestAllowlist' }, window.location.origin);
   } catch {
     // ignore
   }
@@ -231,6 +278,10 @@ function clearAllowlist(boName) {
 
 function ensureEpochManager() {
   if (epochManager) {
+    const currentBo = getRuntimeMeta(runtimeContext).boName;
+    if (currentBo && epochManager.getBoName() !== currentBo) {
+      epochManager.setBoName(currentBo);
+    }
     return epochManager;
   }
 
@@ -241,7 +292,7 @@ function ensureEpochManager() {
       getAllowlistConfigForRuntime()
     );
     publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
-  });
+  }, getRuntimeMeta(runtimeContext).boName);
 
   return epochManager;
 }
@@ -255,7 +306,32 @@ function maybeDiscoverRuntimeTargets(force = false) {
   return refreshRuntimeTargets(force ? { deepScan: true } : undefined);
 }
 
+function handleBoSwitch(oldBo, newBo) {
+  unwrapAll();
+  clearRegistry();
+
+  const newToken = `${newBo}-${Date.now()}`;
+  resetSession(newToken);
+  resetBootstrapState();
+  hooksInstalled = false;
+  installed = false;
+  resetEpochCounter();
+  epochManager = null;
+
+  for (const key of [...allowlistCache.keys()]) {
+    if (key !== newBo) {
+      allowlistCache.delete(key);
+      allowlistConfigCache.delete(key);
+    }
+  }
+
+  if (isConsoleOutputEnabled()) {
+    scopeLog(`${LOG_PREFIX} BO switched: ${oldBo} → ${newBo}, session=${newToken}`);
+  }
+}
+
 function refreshRuntimeTargets(discoverOptions) {
+  const prevBoName = runtimeContext.boName;
   const routeBo = resolveBoNameFromRoute();
   const useDeep =
     discoverOptions?.deepScan === true ||
@@ -269,6 +345,11 @@ function refreshRuntimeTargets(discoverOptions) {
   runtimeContext.profile = meta.profile;
   runtimeContext.profileDetection = meta.profileDetection;
   runtimeContext.boName = meta.boName;
+
+  if (prevBoName && meta.boName && prevBoName !== meta.boName) {
+    handleBoSwitch(prevBoName, meta.boName);
+  }
+
   if (meta.boName) {
     ensureAllowlistForBoName(meta.boName);
   }
@@ -351,26 +432,55 @@ function installHooks() {
 
   if (hookCount > 0) {
     hooksInstalled = true;
+    if (isConsoleOutputEnabled()) {
+      console.info(
+        `${LOG_PREFIX} hooks installed (${hookCount}) | profile=${profile} | viewModel=${!!runtimeContext.viewModel} | boName=${getRuntimeMeta(runtimeContext).boName || '—'}`
+      );
+    }
   }
 
   return hookCount;
 }
 
-function markInstalled() {
-  const meta = getRuntimeMeta(runtimeContext);
+function mirrorStateScopeApiToTop() {
+  try {
+    if (window.top && window.top !== window && window.__StateScope__) {
+      window.top.__StateScope__ = window.__StateScope__;
+    }
+  } catch {
+    // cross-origin top
+  }
+}
 
+/** bizDebug 开启后立即暴露 Debug API，不等待 viewModel / hook 就绪 */
+function ensureStateScopeApi() {
+  if (apiInstalled && window.__StateScope__?.version) {
+    mirrorStateScopeApiToTop();
+    return window.__StateScope__;
+  }
+
+  apiInstalled = true;
   window.__StateScope__ = {
-    installed: true,
-    version: '0.8.0',
+    installed: false,
+    version: '0.8.20',
     mode: 'P2-lowcode-capture',
     getMeta: () => getRuntimeMeta(runtimeContext),
     getDiagnostics: () => getActivationDiagnostics(runtimeContext),
+    getHookStatus: () => ({
+      installed: !!installed,
+      hooksInstalled: !!hooksInstalled,
+      profile: runtimeContext.profile || 'unknown',
+      boName: getRuntimeMeta(runtimeContext).boName || '',
+      lowcodeViewModel: !!runtimeContext.viewModel,
+      diagnostics: getActivationDiagnostics(runtimeContext)
+    }),
     rediscover: () => {
       lastDiscoverAt = 0;
       refreshRuntimeTargets({ deepScan: true });
       hooksInstalled = false;
       installHooks();
       bootstrapAllowlists();
+      bootstrapScenarioForRuntime(getRuntimeMeta(runtimeContext).boName);
       return getRuntimeMeta(runtimeContext);
     },
     getAllowlist: () => resolveAllowlistPathSet(getRuntimeMeta(runtimeContext).boName),
@@ -401,6 +511,12 @@ function markInstalled() {
       }
       return isAutoAllowlistEnabled();
     },
+    getDiffModel: () => ({
+      profile: runtimeContext.profile,
+      axis: runtimeContext.profile === 'lowcode'
+        ? { oldSide: 'visibleSnap (finalSnap)', newSide: 'shadowSnap', description: '可见态 vs 影子态' }
+        : { oldSide: 'oldSnap', newSide: 'newSnap', description: '操作前 vs 操作后' }
+    }),
     getProfileDetection: () => getProfileDetection(runtimeContext),
     getProfileMode: () => getForcedProfileMode(),
     setProfileMode(mode) {
@@ -411,6 +527,8 @@ function markInstalled() {
     getScenarioCatalog: () => getScenarioCatalog(getRuntimeMeta(runtimeContext).boName),
     getScenarioCatalogPack: () => getScenarioCatalogPack(getRuntimeMeta(runtimeContext).boName),
     getScenarioCatalogSummary: () => getScenarioCatalogSummary(getRuntimeMeta(runtimeContext).boName),
+    getScenarioDiagnostics: () => getScenarioDiagnostics(getRuntimeMeta(runtimeContext).boName),
+    reconcileScenarioTag: () => reconcileScenarioTagForBo(getRuntimeMeta(runtimeContext).boName),
     applyScenarioCatalog(config, boName) {
       return applyScenarioCatalog(config, boName);
     },
@@ -429,7 +547,8 @@ function markInstalled() {
         }),
         trigger,
         'incremental',
-        discoverMdfBizApplication(runtimeContext.viewModel)
+        discoverMdfBizApplication(runtimeContext.viewModel),
+        { force: true }
       );
       return { ok, hooks: getActivationDiagnostics(runtimeContext) };
     },
@@ -440,19 +559,46 @@ function markInstalled() {
         discoverMdfBizApplication(runtimeContext.viewModel)
       ),
     forceFinalize: () => ensureEpochManager().finalizeEpoch(),
+    getBoSessionToken: () => getSessionToken(),
     getPanelSyncPayload: () => getPanelSyncPayload(),
     getPanelSyncSummary: () => getPanelSyncSummary(),
     syncPanelState: () => republishCachedPanelState(),
+    getBootstrapStatus: () => getBootstrapStatus(),
+    getHookLiveness: () => getHookLiveness(),
+    unwrapAll: () => unwrapAll(),
+    unwrapHook: (name) => unwrapHook(name),
+    verifyHookIntegrity: () => verifyHookIntegrity(),
     extensionRelayBroken: false
   };
 
   installDebugApi(window, scopeLog);
+  installScenarioCatalogBridge();
+  bootstrapScenarioForRuntime(getRuntimeMeta(runtimeContext).boName);
+  mirrorStateScopeApiToTop();
+  return window.__StateScope__;
+}
+
+function markInstalled() {
+  const meta = getRuntimeMeta(runtimeContext);
+  const api = ensureStateScopeApi();
+  api.installed = true;
+
   bootstrapAllowlists();
-  bootstrapScenarioCatalog(getRuntimeMeta(runtimeContext).boName);
+  const scenarioBoot = bootstrapScenarioForRuntime(meta.boName);
   publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
+  republishCachedPanelState();
   requestAllowlistFromBridge();
+  mirrorStateScopeApiToTop();
 
   if (isConsoleOutputEnabled()) {
+    if (!getScenarioCatalogPack(meta.boName)) {
+      scopeLog(
+        `${LOG_PREFIX} 场景包未加载：Panel → 场景回归 → 上传 ${meta.boName}.scenarios.v1.json`
+      );
+    }
+    if (scenarioBoot.cleared || scenarioBoot.reason === 'auto-set-first-scenario') {
+      scopeLog(`${LOG_PREFIX} scenarioTag reconciled`, scenarioBoot);
+    }
     console.info(
       `${LOG_PREFIX} active | boName=${meta.boName || '(unknown)'} | profile=${meta.profile} | route=${meta.route}`
     );
@@ -545,31 +691,38 @@ function startPolling() {
   let attempts = 0;
 
   const tick = () => {
-    attempts += 1;
-    const status = activateIfReady();
+    try {
+      attempts += 1;
+      const status = activateIfReady();
 
-    if (status === 'no-debug' || status === 'ready') {
-      return 'stop';
-    }
+      if (status === 'no-debug' || status === 'ready') {
+        return 'stop';
+      }
 
-    if (status === 'waiting-targets') {
-      logWaitingReason(attempts);
-    }
+      if (status === 'waiting-targets') {
+        logWaitingReason(attempts);
+      }
 
-    if (attempts >= MAX_POLL_ATTEMPTS && !lowcodeHooksIncomplete()) {
+      if (attempts >= MAX_POLL_ATTEMPTS && !lowcodeHooksIncomplete()) {
+        if (isConsoleOutputEnabled()) {
+          console.warn(`${LOG_PREFIX} gave up after ${MAX_POLL_ATTEMPTS} attempts.`, getActivationDiagnostics(runtimeContext));
+        }
+        return 'stop';
+      }
+
+      if (attempts >= MAX_POLL_ATTEMPTS && lowcodeHooksIncomplete()) {
+        if (attempts === MAX_POLL_ATTEMPTS && isConsoleOutputEnabled()) {
+          console.warn(`${LOG_PREFIX} lowcode hooks incomplete, keep polling…`, getActivationDiagnostics(runtimeContext));
+        }
+      }
+
+      return 'continue';
+    } catch (error) {
       if (isConsoleOutputEnabled()) {
-        console.warn(`${LOG_PREFIX} gave up after ${MAX_POLL_ATTEMPTS} attempts.`, getActivationDiagnostics(runtimeContext));
+        console.error(`${LOG_PREFIX} activate tick failed:`, error);
       }
-      return 'stop';
+      return 'continue';
     }
-
-    if (attempts >= MAX_POLL_ATTEMPTS && lowcodeHooksIncomplete()) {
-      if (attempts === MAX_POLL_ATTEMPTS && isConsoleOutputEnabled()) {
-        console.warn(`${LOG_PREFIX} lowcode hooks incomplete, keep polling…`, getActivationDiagnostics(runtimeContext));
-      }
-    }
-
-    return 'continue';
   };
 
   if (tick() === 'stop') {
@@ -596,8 +749,13 @@ function bootInjector() {
 
   if (isConsoleOutputEnabled()) {
     console.info(`${LOG_PREFIX} injector loaded. bizDebug=true`);
+    console.info(
+      `${LOG_PREFIX} Debug API → __StateScope__（iframe 内 Console 请选 top 或执行 top.__StateScope__）`
+    );
   }
 
+  maybeDiscoverRuntimeTargets();
+  ensureStateScopeApi();
   bootstrapAllowlists();
   startPolling();
 }

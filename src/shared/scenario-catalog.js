@@ -150,6 +150,28 @@ export function normalizeScenarioPack(pack) {
     return null;
   }
 
+  // 已归一化（Panel/SW 二次写入）：直接复用，避免 SSOT→tool 双次转换丢字段
+  if (pack.source === 'ssot-upload' || pack.source === 'tool-l3') {
+    const scenarios = pack.scenarios
+      .filter((item) => item?.tag)
+      .map((item) => normalizeToolScenarioItem(item));
+    if (!scenarios.length) {
+      return null;
+    }
+    scenarios.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    return {
+      boName: pack.boName || '',
+      version: pack.version || '',
+      title: pack.title || pack.boName || '',
+      allowlistVersion: pack.allowlistVersion || pack.allowlistRef || '',
+      note: pack.note || '',
+      profile: pack.profile || '',
+      source: pack.source,
+      stateScopeProfile: pack.stateScopeProfile || null,
+      scenarios
+    };
+  }
+
   const ssot = isDomainSsotPack(pack);
   const scenarios = ssot ?
       pack.scenarios.map((item, index) => normalizeSsotScenarioItem(item, index, pack))

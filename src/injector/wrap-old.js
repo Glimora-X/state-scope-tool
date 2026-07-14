@@ -3,7 +3,8 @@ import {
   normalizeOldFieldState
 } from './normalize.js';
 import { filterTopLevelEntries } from './path-filter.js';
-import { isWrapped, markWrapped } from './discover.js';
+import { isWrapped, markWrapped, unmarkWrapped } from './discover.js';
+import { registerHook, markTriggered } from './hook-registry.js';
 import {
   collectDetailFinalStates,
   collectMainFinalStates,
@@ -73,8 +74,11 @@ export function wrapUiStateController(uiState, epochManager, presenter) {
 
   installLegacyDiagnostics(uiState, presenter, null);
 
-  const instrumentedCheck = uiState.checkChangeStates.bind(uiState);
-  uiState.checkChangeStates = (changeData) => {
+  const rawCheck = uiState.checkChangeStates;
+  const instrumentedCheck = rawCheck.bind(uiState);
+
+  const wrapped = (changeData) => {
+    markTriggered('checkChangeStates');
     const result = instrumentedCheck(changeData);
     const scope = mergeScope(takeScopeDiagnostics(), summarizeChangeScope(changeData, presenter, null));
 
@@ -92,6 +96,19 @@ export function wrapUiStateController(uiState, epochManager, presenter) {
 
     return result;
   };
+  uiState.checkChangeStates = wrapped;
+
+  registerHook({
+    name: 'checkChangeStates',
+    target: uiState,
+    methodName: 'checkChangeStates',
+    original: rawCheck,
+    wrapped,
+    onUnwrap() {
+      uiState.checkChangeStates = rawCheck;
+      unmarkWrapped(uiState);
+    }
+  });
 
   markWrapped(uiState);
   return true;

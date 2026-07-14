@@ -1,27 +1,50 @@
-import { isWrapped, markWrapped } from './discover.js';
+/**
+ * 低代码（lowcode）取证模型
+ *
+ * Diff 轴：可见态（visibleSnap）vs 影子态（shadowSnap）
+ * - 可见态 = 用户所见 / getDisable·getVisible 读路径 / fieldModel 终态
+ * - 影子态 = shadowStore / applyStatePatches 写入的升级后状态
+ *
+ * 映射到 epoch 字段：
+ *   oldSnap   ← visibleSnap（命名残留，与 traditional 含义不同）
+ *   finalSnap ← visibleSnap（同 oldSnap，用于兼容传统线消费逻辑）
+ *   newSnap   ← 通常为空
+ *   shadowSnap← shadowStore 终态
+ */
+import { isWrapped, markWrapped, unmarkWrapped } from './discover.js';
+import { registerHook, markTriggered } from './hook-registry.js';
 import {
   bufferLowcodeFinal,
   bufferLowcodeOld,
   bufferLowcodeShadow,
   bufferLowcodeShadowFromPatches,
   bufferLowcodeShadowFromStore,
-  peekLowcodePending
+  peekLowcodePending,
+  getSessionToken
 } from './lowcode-buffer.js';
-import { buildLowcodeMainPath, buildLowcodePathFromGetDisable, resolveMainFieldModel } from './lowcode-paths.js';
+import { buildLowcodePathFromGetDisable } from './lowcode-paths.js';
+import {
+  LOWCODE_STATE_TYPES,
+  sampleAllowlistFieldStatesFromViewModel as sampleAllowlistFields
+} from './lowcode-sample.js';
 import { flattenShadowStore, probeShadowSources } from './lowcode-shadow.js';
+import { scopeLog } from './safe-log.js';
 
 /** 与 OutsourceIssue StateTypeEnum / shadowStore __properties__ 对齐 */
-export const LOWCODE_STATE_TYPES = ['visible', 'disabled'];
+export { LOWCODE_STATE_TYPES };
 
-const RESULT_COMMIT_MS = 80;
+const RESULT_COMMIT_MS = 300;
 const UI_STATE_COMMIT_MS = 900;
 const MIN_DUPLICATE_EPOCH_MS = 2000;
+const BOOTSTRAP_INITIAL_DELAY_MS = 400;
+const BOOTSTRAP_RETRY_DELAYS = [2000, 5000];
 
 let resultCommitTimer = null;
 let resultCommitTrigger = 'afterBizAction';
 let resultCommitPhase = 'incremental';
 let uiStateCommitTimer = null;
-let bootstrapEpochScheduled = false;
+let bootstrapAttempt = 0;
+let bootstrapComplete = false;
 let lastCommitFingerprint = '';
 let lastCommitAt = 0;
 
@@ -38,10 +61,11 @@ function stableSnapFingerprint(...snaps) {
 
 function shouldSkipDuplicateEpoch(trigger, fingerprint) {
   const now = Date.now();
-  if (fingerprint === lastCommitFingerprint && now - lastCommitAt < MIN_DUPLICATE_EPOCH_MS) {
+  const key = `${trigger}::${fingerprint}`;
+  if (key === lastCommitFingerprint && now - lastCommitAt < MIN_DUPLICATE_EPOCH_MS) {
     return true;
   }
-  lastCommitFingerprint = fingerprint;
+  lastCommitFingerprint = key;
   lastCommitAt = now;
   return false;
 }
@@ -50,16 +74,17 @@ const DEFAULT_ALLOWLIST_FIELDS = [
   { path: 'main.currencyId', stateType: 'disabled' },
   { path: 'main.exchangeRate', stateType: 'disabled' },
   { path: 'main.redBlueFlagEnum', stateType: 'disabled' },
-  { path: 'main.vendorId', stateType: 'disabled' }
+  { path: 'main.vendorId', stateType: 'disabled' },
+  { path: 'detailList.{uuid}.warehouseId', stateType: 'disabled' }
 ];
 
-function recordFieldStateSample(name, index, obj, stateType, value) {
+function recordFieldStateSample(name, index, obj, stateType, value, sessionToken) {
   if (typeof value !== 'boolean') {
     return;
   }
   const path = buildLowcodePathFromGetDisable(name, index, obj, stateType);
-  bufferLowcodeOld({ [path]: value });
-  bufferLowcodeFinal({ [path]: value });
+  bufferLowcodeOld({ [path]: value }, sessionToken);
+  bufferLowcodeFinal({ [path]: value }, sessionToken);
 }
 
 function collectBizAppsFromServicesList(card) {
@@ -220,84 +245,52 @@ function resolveRootViewModel(viewModel) {
   return viewModel?.root || viewModel;
 }
 
-function readModelStateType(model, stateType) {
-  if (!model || typeof model.get !== 'function') {
-    return undefined;
-  }
-  try {
-    const value = model.get(stateType);
-    return typeof value === 'boolean' ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * 表头 allowlist 主动采样：按 field.stateType 读 visible/disabled 终态。
- * L2 仅对比字段状态（visible/disabled），不对比字段值。
- */
-function sampleAllowlistFieldStatesFromViewModel(viewModel, allowlistConfig) {
-  if (!viewModel) {
-    return {};
-  }
-
-  const snap = {};
-  const fields = allowlistConfig?.fields?.length ? allowlistConfig.fields : DEFAULT_ALLOWLIST_FIELDS;
-  const sampledMain = new Set();
-
-  for (const field of fields) {
-    const path = field.path;
-    if (!path || path.includes('{uuid}') || !path.startsWith('main.')) {
-      continue;
-    }
-
-    const fieldName = path.slice('main.'.length);
-    const model = resolveMainFieldModel(viewModel, path);
-    if (!model) {
-      continue;
-    }
-
-    const primaryType = field.stateType || 'disabled';
-    const typesToSample =
-      sampledMain.has(fieldName) ?
-        [primaryType]
-      : LOWCODE_STATE_TYPES;
-
-    for (const stateType of typesToSample) {
-      const value = readModelStateType(model, stateType);
-      if (typeof value === 'boolean') {
-        snap[buildLowcodeMainPath(fieldName, stateType)] = value;
-      }
-    }
-    sampledMain.add(fieldName);
-  }
-
-  return snap;
+/** 表头 + 明细 allowlist 主动采样（明细不再跳过 {uuid}） */
+export function sampleAllowlistFieldStatesFromViewModel(viewModel, allowlistConfig) {
+  return sampleAllowlistFields(viewModel, allowlistConfig, DEFAULT_ALLOWLIST_FIELDS);
 }
 
 /**
  * 低代码 L2 结果采样：
- * - final/old = 用户所见（fieldModel visible/disabled + getDisable/getVisible 读路径）
+ * - final/old = 用户所见（fieldModel / column disabled + getDisable 读路径）
  * - shadow = shadowStore 终态（visible + disabled）
  */
-export function commitLowcodeEpoch(epochManager, getContext, trigger, phase = 'incremental', bizAppHint) {
+export function commitLowcodeEpoch(
+  epochManager,
+  getContext,
+  trigger,
+  phase = 'incremental',
+  bizAppHint,
+  options = {}
+) {
   if (!epochManager) {
     return false;
   }
 
+  const sessionToken = options.sessionToken || getSessionToken();
+  if (sessionToken && getSessionToken() && sessionToken !== getSessionToken()) {
+    return false;
+  }
+
+  const force = !!options.force;
+  const isBootstrap = !!options.isBootstrap;
   const { viewModel, allowlistConfig } = getContext() || {};
   const root = resolveRootViewModel(viewModel);
   const bizApp = bizAppHint || discoverMdfBizApplication(viewModel);
 
+  const token = getSessionToken();
   const shadowSnap = flattenShadowStore(root, bizApp, allowlistConfig) || {};
-  if (Object.keys(shadowSnap).length) {
-    bufferLowcodeShadow(shadowSnap);
+  const shadowCaptured = Object.keys(shadowSnap).length > 0;
+  if (shadowCaptured) {
+    bufferLowcodeShadow(shadowSnap, token);
   }
 
   const visibleSnap = sampleAllowlistFieldStatesFromViewModel(viewModel, allowlistConfig);
   if (Object.keys(visibleSnap).length) {
-    bufferLowcodeOld(visibleSnap);
-    bufferLowcodeFinal(visibleSnap);
+    // lowcode 模式下 oldSnap 与 finalSnap 均写入可见态（visibleSnap），
+    // 因为 Diff 旧侧取 finalSnap 作为"用户所见"，oldSnap 仅为兼容保留
+    bufferLowcodeOld(visibleSnap, token);
+    bufferLowcodeFinal(visibleSnap, token);
   }
 
   const pending = peekLowcodePending();
@@ -313,12 +306,19 @@ export function commitLowcodeEpoch(epochManager, getContext, trigger, phase = 'i
   }
 
   const fingerprint = stableSnapFingerprint(pending.final, pending.shadow, shadowSnap, visibleSnap);
-  if (shouldSkipDuplicateEpoch(String(trigger), fingerprint)) {
+  if (!force && shouldSkipDuplicateEpoch(String(trigger), fingerprint)) {
     return false;
   }
+  if (force) {
+    lastCommitFingerprint = `${trigger}::${fingerprint}`;
+    lastCommitAt = Date.now();
+  }
+
+  const bootstrapQuality = isBootstrap ? (shadowCaptured ? 'complete' : 'partial') : undefined;
 
   epochManager.beginEpoch(String(trigger), phase);
-  if (Object.keys(shadowSnap).length) {
+  epochManager.setMeta?.({ isBootstrap, shadowCaptured, bootstrapQuality });
+  if (shadowCaptured) {
     epochManager.recordShadow?.(shadowSnap);
   }
   if (Object.keys(visibleSnap).length) {
@@ -326,7 +326,7 @@ export function commitLowcodeEpoch(epochManager, getContext, trigger, phase = 'i
     epochManager.recordOld?.(visibleSnap);
   }
   epochManager.commitEpoch();
-  return true;
+  return { committed: true, shadowCaptured, isBootstrap, bootstrapQuality };
 }
 
 function scheduleUiStateEpochCommit(epochManager, getContext, bizApp) {
@@ -343,13 +343,45 @@ function scheduleUiStateEpochCommit(epochManager, getContext, bizApp) {
 }
 
 function scheduleBootstrapEpoch(epochManager, getContext, bizApp) {
-  if (!epochManager || bootstrapEpochScheduled) {
+  if (!epochManager || bootstrapComplete) {
     return;
   }
-  bootstrapEpochScheduled = true;
+
+  const delay = bootstrapAttempt === 0
+    ? BOOTSTRAP_INITIAL_DELAY_MS
+    : BOOTSTRAP_RETRY_DELAYS[bootstrapAttempt - 1];
+
+  if (delay === undefined) {
+    scopeLog('bootstrap: 重试次数用尽，shadowStore 可能尚未接入');
+    return;
+  }
+
+  const currentAttempt = bootstrapAttempt;
+  bootstrapAttempt += 1;
+
   setTimeout(() => {
-    commitLowcodeEpoch(epochManager, getContext, 'bootstrap', 'init-full', bizApp);
-  }, 400);
+    try {
+      const result = commitLowcodeEpoch(
+        epochManager, getContext, 'bootstrap', 'init-full', bizApp,
+        { force: true, isBootstrap: true }
+      );
+
+      if (result && result.shadowCaptured) {
+        bootstrapComplete = true;
+        scopeLog('bootstrap: 初始化态采集完成');
+      } else if (currentAttempt < BOOTSTRAP_RETRY_DELAYS.length) {
+        scopeLog(
+          `bootstrap: shadowSnap 为空，${BOOTSTRAP_RETRY_DELAYS[currentAttempt]}ms 后重试` +
+          ` (${currentAttempt + 1}/${BOOTSTRAP_RETRY_DELAYS.length + 1})`
+        );
+        scheduleBootstrapEpoch(epochManager, getContext, bizApp);
+      } else {
+        scopeLog('bootstrap: 最终尝试完成，shadowSnap 仍为空');
+      }
+    } catch (err) {
+      scopeLog('bootstrap: 采集异常', err);
+    }
+  }, delay);
 }
 
 function scheduleResultEpochCommit(epochManager, getContext, trigger, phase, bizApp) {
@@ -377,10 +409,16 @@ function wrapUiStateReader(uiRoot, getContext, bizApp, epochManager, propName, s
     return false;
   }
 
+  const hookSessionToken = getSessionToken();
+
   const wrapped = (name, index, obj) => {
+    markTriggered(propName);
     const result = original.call(uiRoot, name, index, obj);
-    recordFieldStateSample(name, index, obj, stateType, !!result);
-    scheduleUiStateEpochCommit(epochManager, getContext, bizApp);
+    const currentToken = getSessionToken();
+    if (!hookSessionToken || !currentToken || hookSessionToken === currentToken) {
+      recordFieldStateSample(name, index, obj, stateType, !!result, currentToken);
+      scheduleUiStateEpochCommit(epochManager, getContext, bizApp);
+    }
     return result;
   };
 
@@ -398,6 +436,25 @@ function wrapUiStateReader(uiRoot, getContext, bizApp, epochManager, propName, s
     uiRoot.__stateScopeUiReaderWrapped = {};
   }
   uiRoot.__stateScopeUiReaderWrapped[propName] = true;
+
+  registerHook({
+    name: propName,
+    target: uiRoot,
+    methodName: propName,
+    original,
+    wrapped,
+    resolveCurrent: () => resolveUiHookFn(uiRoot, propName),
+    onUnwrap() {
+      try { uiRoot.set(propName, original); } catch { /* ignore */ }
+      if (uiRoot.__stateScopeUiReaderWrapped) {
+        delete uiRoot.__stateScopeUiReaderWrapped[propName];
+      }
+      if (!uiRoot.__stateScopeUiReaderWrapped?.getDisable && !uiRoot.__stateScopeUiReaderWrapped?.getVisible) {
+        delete uiRoot.__stateScopeUiReaderHooked;
+      }
+    }
+  });
+
   return true;
 }
 
@@ -455,58 +512,118 @@ export function wrapMdfBizApplication(bizApp, epochManager, getContext = () => (
     return false;
   }
 
-  const originalDispatch = bizApp.doDispatch.bind(bizApp);
-  bizApp.doDispatch = async function doDispatchWrapped(action, callback) {
-    ensureLowcodeLazyHooks(viewModel, epochManager, getContext, bizApp);
-    const actionPath = action?.path || action?.params?.path || action?.type || 'doDispatch';
-    bizApp.__stateScopeLastAction = actionPath;
-    bizApp.__stateScopeLastPhase = resolveDispatchPhase(action);
+  const hookSessionToken = getSessionToken();
+
+  const rawDoDispatch = bizApp.doDispatch;
+  const originalDispatch = rawDoDispatch.bind(bizApp);
+  const wrappedDispatch = async function doDispatchWrapped(action, callback) {
+    markTriggered('doDispatch');
+    const currentToken = getSessionToken();
+    const sessionActive = !hookSessionToken || !currentToken || hookSessionToken === currentToken;
+    if (sessionActive) {
+      ensureLowcodeLazyHooks(viewModel, epochManager, getContext, bizApp);
+      const actionPath = action?.path || action?.params?.path || action?.type || 'doDispatch';
+      bizApp.__stateScopeLastAction = actionPath;
+      bizApp.__stateScopeLastPhase = resolveDispatchPhase(action);
+    }
     return originalDispatch(action, callback);
   };
+  bizApp.doDispatch = wrappedDispatch;
+
+  registerHook({
+    name: 'doDispatch',
+    target: bizApp,
+    methodName: 'doDispatch',
+    original: rawDoDispatch,
+    wrapped: wrappedDispatch,
+    onUnwrap() {
+      bizApp.doDispatch = rawDoDispatch;
+      unmarkWrapped(bizApp);
+    }
+  });
 
   if (typeof bizApp.applyStateAfterDataSync === 'function') {
-    const originalApply = bizApp.applyStateAfterDataSync.bind(bizApp);
-    bizApp.applyStateAfterDataSync = async function applyStateAfterDataSyncWrapped(
+    const rawApply = bizApp.applyStateAfterDataSync;
+    const originalApply = rawApply.bind(bizApp);
+    const wrappedApply = async function applyStateAfterDataSyncWrapped(
       changedPatches,
       statePatches
     ) {
+      markTriggered('applyStateAfterDataSync');
       const result = await originalApply(changedPatches, statePatches);
-      try {
-        const ctx = getContext();
-        const vm = ctx?.viewModel || viewModel;
-        bufferLowcodeShadowFromStore(
-          resolveRootViewModel(vm),
-          bizApp,
-          ctx?.allowlistConfig
-        );
-        if (statePatches && Object.keys(statePatches).length) {
-          bufferLowcodeShadowFromPatches(statePatches, 'shadow');
+      const currentToken = getSessionToken();
+      const sessionActive = !hookSessionToken || !currentToken || hookSessionToken === currentToken;
+      if (sessionActive) {
+        try {
+          const ctx = getContext();
+          const vm = ctx?.viewModel || viewModel;
+          bufferLowcodeShadowFromStore(
+            resolveRootViewModel(vm),
+            bizApp,
+            ctx?.allowlistConfig,
+            currentToken
+          );
+          if (statePatches && Object.keys(statePatches).length) {
+            bufferLowcodeShadowFromPatches(statePatches, 'shadow', currentToken);
+          }
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
       }
       return result;
     };
+    bizApp.applyStateAfterDataSync = wrappedApply;
+
+    registerHook({
+      name: 'applyStateAfterDataSync',
+      target: bizApp,
+      methodName: 'applyStateAfterDataSync',
+      original: rawApply,
+      wrapped: wrappedApply,
+      onUnwrap() {
+        bizApp.applyStateAfterDataSync = rawApply;
+      }
+    });
   }
 
   const stateManager = bizApp.stateManager;
   if (stateManager && typeof stateManager.recomputeStatesForPatches === 'function' && !stateManager.__stateScopeRecomputeWrapped) {
-    const originalRecompute = stateManager.recomputeStatesForPatches.bind(stateManager);
-    stateManager.recomputeStatesForPatches = async function recomputeWrapped(patches) {
+    const rawRecompute = stateManager.recomputeStatesForPatches;
+    const originalRecompute = rawRecompute.bind(stateManager);
+    const wrappedRecompute = async function recomputeWrapped(patches) {
+      markTriggered('recomputeStatesForPatches');
       const result = await originalRecompute(patches);
-      try {
-        const ctx = getContext();
-        bufferLowcodeShadowFromStore(
-          resolveRootViewModel(ctx?.viewModel || viewModel),
-          bizApp,
-          ctx?.allowlistConfig
-        );
-      } catch {
-        // ignore
+      const currentToken = getSessionToken();
+      const sessionActive = !hookSessionToken || !currentToken || hookSessionToken === currentToken;
+      if (sessionActive) {
+        try {
+          const ctx = getContext();
+          bufferLowcodeShadowFromStore(
+            resolveRootViewModel(ctx?.viewModel || viewModel),
+            bizApp,
+            ctx?.allowlistConfig,
+            currentToken
+          );
+        } catch {
+          // ignore
+        }
       }
       return result;
     };
+    stateManager.recomputeStatesForPatches = wrappedRecompute;
     stateManager.__stateScopeRecomputeWrapped = true;
+
+    registerHook({
+      name: 'recomputeStatesForPatches',
+      target: stateManager,
+      methodName: 'recomputeStatesForPatches',
+      original: rawRecompute,
+      wrapped: wrappedRecompute,
+      onUnwrap() {
+        stateManager.recomputeStatesForPatches = rawRecompute;
+        delete stateManager.__stateScopeRecomputeWrapped;
+      }
+    });
   }
 
   markWrapped(bizApp);
@@ -526,11 +643,26 @@ export function wrapSyncChangedFields(interlayer) {
     return false;
   }
 
-  const original = interlayer.syncChangedFields.bind(interlayer);
+  const rawSync = interlayer.syncChangedFields;
+  const original = rawSync.bind(interlayer);
 
-  interlayer.syncChangedFields = async function syncChangedFieldsWrapped(changedFields) {
+  const wrapped = async function syncChangedFieldsWrapped(changedFields) {
+    markTriggered('syncChangedFields');
     return original(changedFields);
   };
+  interlayer.syncChangedFields = wrapped;
+
+  registerHook({
+    name: 'syncChangedFields',
+    target: interlayer,
+    methodName: 'syncChangedFields',
+    original: rawSync,
+    wrapped,
+    onUnwrap() {
+      interlayer.syncChangedFields = rawSync;
+      unmarkWrapped(interlayer);
+    }
+  });
 
   markWrapped(interlayer);
   return true;
@@ -547,6 +679,9 @@ export function wrapAfterBizAction(viewModel, epochManager, getContext, bizApp) 
   }
 
   let wrappedAny = false;
+  let afterBizIndex = 0;
+
+  const hookSessionToken = getSessionToken();
 
   for (const root of roots) {
     if (root.__stateScopeAfterBizWrapped) {
@@ -554,22 +689,44 @@ export function wrapAfterBizAction(viewModel, epochManager, getContext, bizApp) 
       continue;
     }
 
-    const original = root.execute.bind(root);
+    const hookName = afterBizIndex === 0 ? 'afterBizAction' : `afterBizAction#${afterBizIndex}`;
+    afterBizIndex += 1;
 
-    root.execute = async function executeWrapped(actionName, ...args) {
+    const rawExecute = root.execute;
+    const original = rawExecute.bind(root);
+
+    const wrappedExecute = async function executeWrapped(actionName, ...args) {
+      markTriggered(hookName);
       const result = await original(actionName, ...args);
       if (actionName === 'afterBizAction') {
-        try {
-          const activeBiz = bizApp || discoverMdfBizApplication(viewModel);
-          const trigger = activeBiz?.__stateScopeLastAction || 'afterBizAction';
-          const phase = activeBiz?.__stateScopeLastPhase || 'incremental';
-          scheduleResultEpochCommit(epochManager, getContext, trigger, phase, activeBiz);
-        } catch {
-          // ignore
+        const currentToken = getSessionToken();
+        const sessionActive = !hookSessionToken || !currentToken || hookSessionToken === currentToken;
+        if (sessionActive) {
+          try {
+            const activeBiz = bizApp || discoverMdfBizApplication(viewModel);
+            const trigger = activeBiz?.__stateScopeLastAction || 'afterBizAction';
+            const phase = activeBiz?.__stateScopeLastPhase || 'incremental';
+            scheduleResultEpochCommit(epochManager, getContext, trigger, phase, activeBiz);
+          } catch {
+            // ignore
+          }
         }
       }
       return result;
     };
+    root.execute = wrappedExecute;
+
+    registerHook({
+      name: hookName,
+      target: root,
+      methodName: 'execute',
+      original: rawExecute,
+      wrapped: wrappedExecute,
+      onUnwrap() {
+        root.execute = rawExecute;
+        delete root.__stateScopeAfterBizWrapped;
+      }
+    });
 
     root.__stateScopeAfterBizWrapped = true;
     wrappedAny = true;
@@ -621,6 +778,19 @@ export function wrapLowcodeRuntime(viewModel, epochManager, getContext = () => (
   }
 
   return hooks;
+}
+
+export function resetBootstrapState() {
+  bootstrapAttempt = 0;
+  bootstrapComplete = false;
+}
+
+export function getBootstrapStatus() {
+  return {
+    attempt: bootstrapAttempt,
+    complete: bootstrapComplete,
+    maxAttempts: BOOTSTRAP_RETRY_DELAYS.length + 1
+  };
 }
 
 export { wrapGetDisable as wrapGetDisableLegacy };
