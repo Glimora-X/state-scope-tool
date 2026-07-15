@@ -399,6 +399,11 @@ function discoverLowcodeViewModelFromAppManager(expectedBoName = '') {
     }
   }
 
+  // 已指定 expectedBoName 时，禁止回落成其它单据 VM（多 Tab 残留）
+  if (expectedBoName) {
+    return null;
+  }
+
   for (const vm of candidates) {
     if (isLowcodeViewModel(vm)) {
       return vm;
@@ -523,10 +528,13 @@ export function discoverLowcodeViewModel({ deepScan = false, expectedBoName = ''
 
   const fromFiber = discoverLowcodeViewModelViaReact();
   if (fromFiber) {
-    return fromFiber;
+    // Fiber 也可能命中残留 Tab：有 route 提示时校验
+    if (!boHint || viewModelMatchesBoName(fromFiber, boHint)) {
+      return fromFiber;
+    }
   }
 
-  if (deepScan) {
+  if (deepScan && !boHint) {
     const fromWindow = scanWindowLimited(isLowcodeViewModel, 4);
     if (fromWindow) {
       return fromWindow;
@@ -641,17 +649,36 @@ export function resolveBoNameFromRoute() {
 }
 
 export function resolveBoName({ bizApplication, presenter, formController, viewModel }) {
-  return (
+  const routeBo = resolveBoNameFromRoute();
+  const viewBo = resolveBoNameFromViewModel(viewModel);
+  const bizBo =
     safeOwn(bizApplication, 'boName') ||
     safeOwn(bizApplication, 'options')?.boName ||
     safeOwn(presenter, 'voucherBoName') ||
     safeOwn(presenter, 'boName') ||
     safeOwn(formController, 'presenter')?.voucherBoName ||
     safeOwn(formController, 'presenter')?.boName ||
-    resolveBoNameFromViewModel(viewModel) ||
-    resolveBoNameFromRoute() ||
-    ''
-  );
+    '';
+
+  // 多 Tab SPA：hash/route 代表当前可见单据；window.bizApplication 可能残留上一单
+  if (routeBo) {
+    if (viewBo && foldBoToken(viewBo) === foldBoToken(routeBo)) {
+      return routeBo;
+    }
+    if (!bizBo || foldBoToken(bizBo) === foldBoToken(routeBo)) {
+      return routeBo;
+    }
+    // 路由与 window.bizApplication 冲突时以路由为准（低代码多单据 Tab）
+    return routeBo;
+  }
+
+  return viewBo || bizBo || '';
+}
+
+function foldBoToken(value) {
+  return String(value || '')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toLowerCase();
 }
 
 export function discoverRuntimeTargets(options = {}) {
@@ -677,6 +704,16 @@ export function discoverRuntimeTargets(options = {}) {
   const uiFromForm = formControllers ? safeOwn(formControllers, 'uiStateController') : null;
 
   const uiStateController = discoverUiStateController(presenter, { deepScan }) || uiFromForm || null;
+
+  // 路由与 window.bizApplication 不一致时，不要把错误 BA 带进 context（boName 已按路由解析）
+  if (
+    routeBoName &&
+    bizApplication &&
+    safeOwn(bizApplication, 'boName') &&
+    foldBoToken(safeOwn(bizApplication, 'boName')) !== foldBoToken(routeBoName)
+  ) {
+    bizApplication = null;
+  }
 
   const boName = resolveBoName({ bizApplication, presenter, formController, viewModel: lowcodeViewModel });
 

@@ -376,12 +376,32 @@ function scheduleBootstrapEpoch(epochManager, getContext, bizApp) {
         );
         scheduleBootstrapEpoch(epochManager, getContext, bizApp);
       } else {
-        scopeLog('bootstrap: 最终尝试完成，shadowSnap 仍为空');
+        // 最终仍无 shadow：至少留下一帧 visible 采样，避免「空白打开」时间线空白
+        const visibleOnly = commitLowcodeEpoch(
+          epochManager, getContext, 'bootstrap-visible', 'init-full', bizApp,
+          { force: true, isBootstrap: true }
+        );
+        bootstrapComplete = true;
+        scopeLog(
+          visibleOnly?.committed
+            ? 'bootstrap: shadow 仍空，已写入可见态 init Epoch（可继续改字段或点采样）'
+            : 'bootstrap: 最终尝试完成，shadowSnap/visibleSnap 均空'
+        );
       }
     } catch (err) {
       scopeLog('bootstrap: 采集异常', err);
     }
   }, delay);
+}
+
+/** 同 BO 路由跳转（列表→新增空白）时重新采 init Epoch */
+export function requestBootstrapResample(epochManager, getContext, bizApp) {
+  if (!epochManager) {
+    return false;
+  }
+  resetBootstrapState();
+  scheduleBootstrapEpoch(epochManager, getContext, bizApp);
+  return true;
 }
 
 function scheduleResultEpochCommit(epochManager, getContext, trigger, phase, bizApp) {

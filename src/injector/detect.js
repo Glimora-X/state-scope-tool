@@ -31,16 +31,21 @@ export function getRouteHint() {
 }
 
 function resolveMetaBoName(context = {}) {
-  return (
-    context.boName ||
+  const routeBo = resolveBoNameFromRoute();
+  const viewBo = resolveBoNameFromViewModel(context.viewModel);
+  const contextBo = context.boName || '';
+  const bizBo =
     getBoName(context.bizApplication) ||
     context.presenter?.voucherBoName ||
     context.presenter?.boName ||
     context.formController?.presenter?.voucherBoName ||
-    resolveBoNameFromViewModel(context.viewModel) ||
-    resolveBoNameFromRoute() ||
-    ''
-  );
+    '';
+
+  // 多 Tab：当前 hash 上的单据优先于 window.bizApplication / 残留 context
+  if (routeBo) {
+    return routeBo;
+  }
+  return contextBo || viewBo || bizBo || '';
 }
 
 export function detectProfile(context = {}) {

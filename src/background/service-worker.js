@@ -30,7 +30,7 @@ function resolveBundledScenarioPack(boName) {
   return getBundledScenarioPack(boName);
 }
 
-function hasMatchingScenarioCatalog(state, boName) {
+function hasMatchingScenarioCatalog(state, boName, incomingPack = null) {
   const pack = state.scenarioCatalogPack;
   if (!pack?.scenarios?.length) {
     return false;
@@ -38,11 +38,17 @@ function hasMatchingScenarioCatalog(state, boName) {
   if (boName && pack.boName && pack.boName !== boName) {
     return false;
   }
-  if (pack.boName === 'GoodsIssue' && pack.version === GOODS_ISSUE_L3_VERSION) {
-    return true;
+  if (!incomingPack) {
+    // 无对端包时：仅表示「SW 侧已有同 BO 包」，调用方须再用 epoch 决定是否跳过
+    return !!pack.boName && pack.scenarios.length > 0;
   }
-  // 用户上传的领域 SSOT / 工具 L3：同 boName 且有场景即视为已就绪
-  return !!pack.boName && pack.scenarios.length > 0;
+  const left = normalizeScenarioPack(pack);
+  const right = normalizeScenarioPack(incomingPack);
+  if (!left?.catalogEpoch || !right?.catalogEpoch) {
+    return false;
+  }
+  // epoch + source 都一致才算匹配（① 覆盖 ② 即使 epoch 相同）
+  return left.catalogEpoch === right.catalogEpoch && (left.source || '') === (right.source || '');
 }
 
 function ensureScenarioCatalog(state, boName, { force = false } = {}) {
@@ -51,17 +57,9 @@ function ensureScenarioCatalog(state, boName, { force = false } = {}) {
   }
 
   const targetBo = boName || state.runtime?.meta?.boName || '';
-  if (!force && hasMatchingScenarioCatalog(state, targetBo)) {
-    return {
-      ok: true,
-      applied: false,
-      reason: 'already-has-catalog',
-      boName: state.scenarioCatalogPack.boName,
-      version: state.scenarioCatalogPack.version,
-      scenarioCount: state.scenarioCatalogPack.scenarios.length,
-      catalog: state.scenarioCatalogPack,
-      scenarioReport: state.scenarioReport
-    };
+  // 禁止「存在即最新」：无传入对账包时，已有同 BO 包也不算最终权威，仅作会话缓存
+  if (!force && !targetBo) {
+    return { ok: false, error: '无 boName，无法选择场景包', needsUpload: true };
   }
 
   if (!targetBo) {
@@ -70,16 +68,25 @@ function ensureScenarioCatalog(state, boName, { force = false } = {}) {
 
   const bundled = resolveBundledScenarioPack(targetBo);
   if (!bundled) {
-    if (state.scenarioCatalogPack?.boName === targetBo && state.scenarioCatalogPack.scenarios?.length) {
+    if (
+      !force &&
+      state.scenarioCatalogPack?.boName === targetBo &&
+      state.scenarioCatalogPack.scenarios?.length &&
+      state.scenarioCatalogPack.catalogEpoch
+    ) {
       return {
         ok: true,
         applied: false,
-        reason: 'uploaded-catalog',
+        reason: 'session-cache',
         boName: state.scenarioCatalogPack.boName,
         version: state.scenarioCatalogPack.version,
+        catalogEpoch: state.scenarioCatalogPack.catalogEpoch,
+        source: state.scenarioCatalogPack.source || '',
         scenarioCount: state.scenarioCatalogPack.scenarios.length,
         catalog: state.scenarioCatalogPack,
-        scenarioReport: state.scenarioReport
+        scenarioReport: state.scenarioReport,
+        // 非内置 BO：仍提示可由页面 ① 覆盖
+        needsPageAuthority: true
       };
     }
     // 清空错误 BO 的旧包，避免 OutsourceIssue 页残留销货单 checklist
@@ -90,9 +97,31 @@ function ensureScenarioCatalog(state, boName, { force = false } = {}) {
     }
     return {
       ok: false,
-      error: `${targetBo} 无内置场景包，请上传领域 *.scenarios.v1.json（SSOT）`,
+      error: `${targetBo} 无内置场景包，请等待领域自注册或上传 *.scenarios.v1.json`,
       needsUpload: true,
       boName: targetBo
+    };
+  }
+
+  const existing = state.scenarioCatalogPack;
+  if (
+    !force &&
+    existing?.boName === bundled.boName &&
+    existing?.catalogEpoch &&
+    existing.catalogEpoch === bundled.catalogEpoch &&
+    (existing.source || '') === (bundled.source || '')
+  ) {
+    return {
+      ok: true,
+      applied: false,
+      reason: 'epoch-matched',
+      boName: existing.boName,
+      version: existing.version,
+      catalogEpoch: existing.catalogEpoch,
+      source: existing.source || '',
+      scenarioCount: existing.scenarios.length,
+      catalog: existing,
+      scenarioReport: state.scenarioReport
     };
   }
 
@@ -104,10 +133,34 @@ function ensureScenarioCatalog(state, boName, { force = false } = {}) {
     applied: true,
     boName: bundled.boName,
     version: bundled.version,
+    catalogEpoch: bundled.catalogEpoch,
+    source: bundled.source || '',
     scenarioCount: bundled.scenarios.length,
     catalog: bundled,
     scenarioReport: state.scenarioReport
   };
+}
+
+/** 仅修正存量 os-s01：去掉空白单不可达的明细 {uuid} watch，并重放累计 */
+function migrateOsS01BlankWatchFields(state) {
+  const pack = state?.scenarioCatalogPack;
+  const meta = pack?.scenarios?.find((item) => item?.tag === 'os-s01');
+  if (!meta?.watchFields?.some((w) => String(w?.path || '').includes('{uuid}'))) {
+    return false;
+  }
+  meta.watchFields = meta.watchFields.filter((w) => !String(w?.path || '').includes('{uuid}'));
+  const record = state.scenarioReport?.scenarios?.['os-s01'];
+  if (record) {
+    record.watchFields = meta.watchFields;
+  }
+  if (state.epochs?.length) {
+    rebuildDerivedReports(state);
+  } else if (record) {
+    record.allowlistFieldCount = meta.watchFields.length;
+    record.unobservedFields = Math.max(0, record.allowlistFieldCount - (record.readyFields || 0));
+  }
+  state.updatedAt = Date.now();
+  return true;
 }
 
 function emptyTabState(catalogPack) {
@@ -136,9 +189,17 @@ function rebuildDerivedReports(state) {
   let scenarioReport = emptyScenarioReport(state.scenarioCatalogPack);
   const ignoreBefore = state.scenarioIgnoreEpochsBefore || state.scenarioReport?.ignoreEpochsBefore || 0;
   scenarioReport.ignoreEpochsBefore = ignoreBefore;
+  const fallbackTag =
+    state.scenarioCatalogPack?.scenarios?.length ?
+      [...state.scenarioCatalogPack.scenarios].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0]?.tag || ''
+    : '';
   for (const epoch of [...state.epochs].reverse()) {
     cutoverReport = accumulateCutoverReport(cutoverReport, epoch);
-    scenarioReport = accumulateScenarioReport(scenarioReport, epoch);
+    const tagged =
+      epoch?.scenarioTag || !fallbackTag ?
+        epoch
+      : { ...epoch, scenarioTag: fallbackTag };
+    scenarioReport = accumulateScenarioReport(scenarioReport, tagged);
   }
   state.cutoverReport = cutoverReport;
   state.scenarioReport = scenarioReport;
@@ -330,14 +391,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.runtime = message.payload;
       const boName = message.payload?.meta?.boName;
 
-      const pageCatalog = message.payload?.scenarioCatalogPack;
-      if (pageCatalog?.scenarios?.length && pageCatalog.boName) {
-        const hasCatalog = hasMatchingScenarioCatalog(state, pageCatalog.boName);
-        if (!hasCatalog) {
-          const pack = normalizeScenarioPack(pageCatalog);
-          if (pack) {
+      // 完整 scenarios 包只认 Panel SS_APPLY；SS_RUNTIME 只带摘要 hint，避免每轮 Epoch 重建
+      const pageCatalog =
+        message.payload?.scenarioCatalogPack?.scenarios?.length ?
+          message.payload.scenarioCatalogPack
+        : null;
+      if (pageCatalog?.boName) {
+        const pack = normalizeScenarioPack(pageCatalog);
+        if (pack) {
+          const matched = hasMatchingScenarioCatalog(state, pageCatalog.boName, pack);
+          // ① window-registry 即使 epoch 相同也覆盖 source；epoch 不同必须覆盖
+          const forceAuthority =
+            pack.source === 'window-registry' && state.scenarioCatalogPack?.source !== 'window-registry';
+          if (!matched || forceAuthority) {
+            const prevEpoch = state.scenarioCatalogPack?.catalogEpoch || '';
             state.scenarioCatalogPack = pack;
-            if (state.epochs?.length) {
+            if (prevEpoch && prevEpoch !== pack.catalogEpoch) {
+              // catalogEpoch 变化：重建签字骨架，不继承旧进度
+              state.scenarioReport = emptyScenarioReport(pack);
+            } else if (state.epochs?.length) {
               rebuildDerivedReports(state);
             } else {
               state.scenarioReport = emptyScenarioReport(pack);
@@ -357,6 +429,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const state = targetTabId != null ? getTabState(targetTabId) : emptyTabState();
       if (targetTabId != null) {
         ensureScenarioCatalog(state, state.runtime?.meta?.boName);
+        migrateOsS01BlankWatchFields(state);
         healScenarioReportFromEpochs(state);
       }
       const issues = await listIssues();
@@ -434,9 +507,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!pack) {
         return { ok: false, error: '无效场景 catalog（需含 scenarios；支持领域 SSOT 或工具 L3）' };
       }
+      const prevEpoch = state.scenarioCatalogPack?.catalogEpoch || '';
       state.scenarioCatalogPack = pack;
-      // 先挂 catalog，再按已有 epochs 重放累计（避免「轮次已产生、场景仍尚未观测」）
-      if (state.epochs?.length) {
+      // catalogEpoch 变化：重建签字骨架，禁止跨 epoch 继承 PASS/BLOCK
+      if (prevEpoch && prevEpoch !== pack.catalogEpoch) {
+        state.scenarioReport = emptyScenarioReport(pack);
+      } else if (state.epochs?.length) {
         rebuildDerivedReports(state);
       } else {
         state.scenarioReport = emptyScenarioReport(pack);
@@ -447,6 +523,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ok: true,
         boName: pack.boName,
         version: pack.version,
+        catalogEpoch: pack.catalogEpoch,
+        source: pack.source || '',
         scenarioCount: pack.scenarios.length,
         catalog: pack,
         scenarioReport: state.scenarioReport
@@ -455,8 +533,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.type === 'SS_MARK_SCENARIO') {
       const state = getTabState(message.tabId);
+      ensureScenarioCatalog(state, state.runtime?.meta?.boName || state.scenarioCatalogPack?.boName);
+      migrateOsS01BlankWatchFields(state);
+
+      // Panel 可能已 hydrate 出场景列表，但 SW 丢 catalog/report → 补齐后再签字
+      if (!state.scenarioReport?.scenarios?.[message.scenarioTag] && state.scenarioCatalogPack?.scenarios?.length) {
+        if (state.epochs?.length) {
+          rebuildDerivedReports(state);
+        } else {
+          state.scenarioReport = emptyScenarioReport(state.scenarioCatalogPack);
+        }
+      }
+
       const result = markScenarioComplete(state.scenarioReport, message.scenarioTag, message.complete !== false);
       if (!result.ok) {
+        if (result.error === '未知场景' && !state.scenarioCatalogPack?.scenarios?.length) {
+          return {
+            ok: false,
+            error: '场景包未同步到后台，请先上传领域 SSOT（或点「加载内置场景」）后再签字',
+            needsUpload: true
+          };
+        }
         return result;
       }
       state.updatedAt = Date.now();
@@ -566,4 +663,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[StateScope] extension installed (P1.5 scenario regression mode)');
+  ensureContextMenus();
+});
+
+const MENU_ROOT = 'ss-root';
+const MENU_ENABLE = 'ss-enable-debug';
+const MENU_HINT = 'ss-open-hint';
+
+function ensureContextMenus() {
+  if (!chrome.contextMenus?.create) {
+    return;
+  }
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU_ROOT,
+      title: 'StateScope',
+      contexts: ['page', 'frame']
+    });
+    chrome.contextMenus.create({
+      id: MENU_ENABLE,
+      parentId: MENU_ROOT,
+      title: '启用调试并刷新本页',
+      contexts: ['page', 'frame']
+    });
+    chrome.contextMenus.create({
+      id: MENU_HINT,
+      parentId: MENU_ROOT,
+      title: '如何打开 StateScope 面板…',
+      contexts: ['page', 'frame']
+    });
+  });
+}
+
+// SW 冷启动后补注册右键菜单
+ensureContextMenus();
+
+chrome.contextMenus?.onClicked?.addListener(async (info, tab) => {
+  if (!tab?.id) {
+    return;
+  }
+  if (info.menuItemId === MENU_HINT) {
+    chrome.tabs.create({ url: chrome.runtime.getURL('src/guide/open-panel.html') });
+    return;
+  }
+  if (info.menuItemId !== MENU_ENABLE) {
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: () => {
+        try {
+          localStorage.setItem('bizDebug', 'true');
+          window.bizDebug = true;
+        } catch {
+          // ignore
+        }
+        location.reload();
+      }
+    });
+  } catch (error) {
+    console.warn('[StateScope] enable debug failed:', error?.message || error);
+  }
 });

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>打开 StateScope 面板</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        max-width: 520px;
+        margin: 48px auto;
+        padding: 0 20px;
+        color: #1a2332;
+        line-height: 1.55;
+      }
+      h1 {
+        font-size: 20px;
+        margin-bottom: 8px;
+      }
+      .subtle {
+        color: #66788a;
+        font-size: 13px;
+      }
+      ol {
+        padding-left: 1.25em;
+      }
+      li {
+        margin: 10px 0;
+      }
+      code {
+        background: #f0f3f7;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      .tip {
+        margin-top: 20px;
+        padding: 12px 14px;
+        background: #f5f8fc;
+        border: 1px solid #d7e0ea;
+        border-radius: 8px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>打开 StateScope 面板</h1>
+    <p class="subtle">受 Chrome 限制，扩展无法一键弹出 DevTools。请按下列步骤进入主界面。</p>
+    <ol>
+      <li>回到单据页，确认已启用调试（右键 → <strong>StateScope → 启用调试并刷新本页</strong>）。</li>
+      <li>按 <code>F12</code>（或右键 → 检查）打开开发者工具。</li>
+      <li>在 DevTools 顶部 Tab 中找到 <strong>StateScope</strong> 并点开。</li>
+    </ol>
+    <div class="tip">
+      若没有 StateScope Tab：到 <code>chrome://extensions</code> 确认扩展已启用，然后<strong>关闭并重新打开</strong> DevTools。
+    </div>
+  </body>
+</html>

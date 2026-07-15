@@ -1,4 +1,4 @@
-import goodsIssueL3 from '../../scenarios/GoodsIssue.L3.v1.json';
+import goodsIssueL3 from '../../scenarios/GoodsIssue.L3.v1.json' with { type: 'json' };
 
 /**
  * 仅传统试点 GoodsIssue 内置。

@@ -24,6 +24,7 @@ import {
   commitLowcodeEpoch,
   probeLowcodeShadow,
   resetBootstrapState,
+  requestBootstrapResample,
   getBootstrapStatus
 } from './wrap-lowcode.js';
 import { resetSession, getSessionToken } from './lowcode-buffer.js';
@@ -41,7 +42,7 @@ import {
 import { scopeLog } from './safe-log.js';
 import { isConsoleOutputEnabled } from './path-filter.js';
 import { buildAllowlistPathSet } from './allowlist-config.js';
-import { getBundledAllowlist } from './bundled-allowlists.js';
+import { scanAllowlistByBoName, diagnoseAllowlistScan } from './discover-allowlist-modules.js';
 import {
   applyScenarioCatalog,
   bootstrapScenarioCatalog,
@@ -51,7 +52,9 @@ import {
   getScenarioCatalogSummary,
   getScenarioDiagnostics,
   getScenarioTag,
+  ensureActiveScenarioTag,
   reconcileScenarioTagForBo,
+  resolvePageScenarioPack,
   setScenarioTag
 } from './scenario-context.js';
 import { buildRuntimePayload } from './panel-payload.js';
@@ -59,6 +62,8 @@ import { getPanelSyncPayload, getPanelSyncSummary, publishRuntimeToPanel, republ
 
 const allowlistCache = new Map();
 const allowlistConfigCache = new Map();
+/** @type {Map<string, { source: string, sourceHint?: string, moduleId?: string }>} */
+const allowlistSourceCache = new Map();
 let epochManager = null;
 let runtimeContext = {};
 let installed = false;
@@ -95,7 +100,36 @@ function installScenarioCatalogBridge() {
   });
 }
 
+function ensureScenarioFromWindowRegistry(boName) {
+  if (!boName) {
+    return false;
+  }
+  try {
+    const { pack, source, error } = resolvePageScenarioPack(boName);
+    if (error === 'normalize-failed') {
+      if (isConsoleOutputEnabled()) {
+        scopeLog(`${LOG_PREFIX} scenario registry normalize failed for ${boName}`);
+      }
+      return false;
+    }
+    if (!pack?.scenarios?.length) {
+      return false;
+    }
+    // resolvePageScenarioPack 对 ① 已覆盖 ②；此处再 apply 保证 tag 初始化
+    const ok = applyScenarioCatalog(pack, boName);
+    if (ok && isConsoleOutputEnabled()) {
+      scopeLog(
+        `scenario catalog loaded: ${boName} v${pack.version || '?'} epoch=${pack.catalogEpoch || '?'} (${pack.scenarios.length} scenarios) [${source || pack.source || '?'}]`
+      );
+    }
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function bootstrapScenarioForRuntime(boName) {
+  ensureScenarioFromWindowRegistry(boName);
   bootstrapScenarioCatalog(boName);
   bootstrapScenarioCatalogFromDom(boName);
   return reconcileScenarioTagForBo(boName);
@@ -130,24 +164,124 @@ function resolveAllowlistConfig(boName) {
   return undefined;
 }
 
+/**
+ * 领域仓 bizDebug 自注册：window.__STATE_SCOPE_ALLOWLISTS__[boName]
+ * （绕过 MF remote / JSON 内联导致的 webpack 扫描失效）
+ */
+function readAllowlistFromWindowRegistry(boName) {
+  try {
+    const reg = window.__STATE_SCOPE_ALLOWLISTS__;
+    if (!reg || typeof reg !== 'object') {
+      return null;
+    }
+    const cfg = boName ? reg[boName] : null;
+    if (cfg?.boName && Array.isArray(cfg.fields) && cfg.fields.length > 0) {
+      return cfg;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function ensureAllowlistForBoName(boName) {
   if (!boName || !isAutoAllowlistEnabled()) {
     return { applied: false, reason: 'no-bo' };
   }
 
   const current = resolveAllowlistConfig(boName);
+  const currentSource = allowlistSourceCache.get(boName)?.source;
+
+  // 优先：领域自注册（window-registry）— SSOT，可刷新覆盖 webpack 旧缓存
+  const fromRegistry = readAllowlistFromWindowRegistry(boName);
+  if (fromRegistry) {
+    if (current?.boName === boName && currentSource === 'window-registry') {
+      // 内容可能更新：仍 apply 一次以同步 fields
+      applyAllowlistConfig(fromRegistry, {
+        source: 'window-registry',
+        sourceHint: `${boName} ← __STATE_SCOPE_ALLOWLISTS__`
+      });
+      return {
+        applied: true,
+        reason: 'already-bound',
+        boName,
+        source: 'window-registry',
+        sourceHint: allowlistSourceCache.get(boName)?.sourceHint
+      };
+    }
+    applyAllowlistConfig(fromRegistry, {
+      source: 'window-registry',
+      sourceHint: `${boName} ← __STATE_SCOPE_ALLOWLISTS__`
+    });
+    return {
+      applied: true,
+      reason: 'window-registry',
+      boName: fromRegistry.boName || boName,
+      source: 'window-registry',
+      sourceHint: `${boName} ← __STATE_SCOPE_ALLOWLISTS__`
+    };
+  }
+
+  if (current?.boName === boName && currentSource === 'webpack-source') {
+    return {
+      applied: true,
+      reason: 'already-bound',
+      boName,
+      source: 'webpack-source',
+      sourceHint: allowlistSourceCache.get(boName)?.sourceHint
+    };
+  }
+
+  const fromWebpack = scanAllowlistByBoName(boName);
+  if (fromWebpack?.config) {
+    applyAllowlistConfig(fromWebpack.config, {
+      source: 'webpack-source',
+      sourceHint: fromWebpack.sourceHint,
+      moduleId: fromWebpack.moduleId
+    });
+    return {
+      applied: true,
+      reason: 'webpack-source',
+      boName: fromWebpack.config.boName || boName,
+      source: 'webpack-source',
+      sourceHint: fromWebpack.sourceHint
+    };
+  }
+
   if (current?.boName === boName) {
-    return { applied: true, reason: 'already-bound', boName };
+    return {
+      applied: true,
+      reason: 'already-bound',
+      boName,
+      source: currentSource || 'cache'
+    };
   }
 
-  const bundled = getBundledAllowlist(boName);
-  if (bundled) {
-    applyAllowlistConfig(normalizeAllowlistConfig(bundled));
-    return { applied: true, reason: 'bundled', boName: bundled.boName };
-  }
+  // registry / webpack / DOM 均未命中 → 引导设置页手工导入
+  return { applied: false, reason: 'need-import', boName };
+}
 
-  requestAllowlistFromBridge();
-  return { applied: false, reason: 'no-bundled', boName };
+function installAllowlistRegistryBridge() {
+  if (window.__stateScopeAllowlistRegistryBridge__) {
+    return;
+  }
+  window.__stateScopeAllowlistRegistryBridge__ = true;
+
+  const onRegister = (event) => {
+    const boName = event?.detail?.boName || getRuntimeMeta(runtimeContext).boName;
+    if (!boName) {
+      return;
+    }
+    if (isAutoAllowlistEnabled()) {
+      ensureAllowlistForBoName(boName);
+    }
+    bootstrapScenarioForRuntime(boName);
+  };
+
+  // 统一事件：领域 publishStateScopeForDebug 一次派发
+  window.addEventListener('statescope:register', onRegister);
+  // 兼容仅 allowlist 的旧事件
+  window.addEventListener('statescope:allowlist', onRegister);
 }
 
 function resolveAllowlistPathSet(boName) {
@@ -159,15 +293,30 @@ function getAllowlistConfigForRuntime() {
   return resolveAllowlistConfig(getRuntimeMeta(runtimeContext).boName);
 }
 
-function applyAllowlistConfig(config) {
+function getAllowlistSourceMeta(boName) {
+  const key = boName || getRuntimeMeta(runtimeContext).boName;
+  if (!key) {
+    return null;
+  }
+  return allowlistSourceCache.get(key) || null;
+}
+
+function applyAllowlistConfig(config, meta = {}) {
   const normalized = normalizeAllowlistConfig(config);
   if (!normalized?.boName) {
     return false;
   }
   allowlistConfigCache.set(normalized.boName, normalized);
   allowlistCache.set(normalized.boName, buildAllowlistPathSet(normalized));
+  const source = meta.source || normalized.__source || 'external';
+  const sourceHint = meta.sourceHint || normalized.__sourceHint || '';
+  const moduleId = meta.moduleId || normalized.__moduleId || '';
+  allowlistSourceCache.set(normalized.boName, { source, sourceHint, moduleId });
   if (isConsoleOutputEnabled()) {
-    scopeLog(`allowlist loaded: ${normalized.boName} v${normalized.version || '?'} (${normalized.fields?.length || 0} fields)`);
+    const hint = sourceHint ? ` · ${sourceHint}` : '';
+    scopeLog(
+      `allowlist loaded: ${normalized.boName} v${normalized.version || '?'} (${normalized.fields?.length || 0} fields) [${source}${hint}]`
+    );
   }
   try {
     window.postMessage(
@@ -175,7 +324,9 @@ function applyAllowlistConfig(config) {
         channel: 'StateScopeInternal',
         type: 'allowlistAck',
         boName: normalized.boName,
-        version: normalized.version || ''
+        version: normalized.version || '',
+        source,
+        sourceHint
       },
       window.location.origin
     );
@@ -191,7 +342,7 @@ function readAllowlistFromDom() {
     if (!raw) {
       return false;
     }
-    return applyAllowlistConfig(JSON.parse(raw));
+    return applyAllowlistConfig(JSON.parse(raw), { source: 'dom' });
   } catch {
     return false;
   }
@@ -202,6 +353,7 @@ function bootstrapAllowlists() {
     return { source: 'disabled', applied: false };
   }
 
+  installAllowlistRegistryBridge();
   readAllowlistFromDom();
   drainPendingAllowlists();
 
@@ -213,7 +365,12 @@ function bootstrapAllowlists() {
   if (boName) {
     const ensured = ensureAllowlistForBoName(boName);
     if (ensured.applied) {
-      return { source: ensured.reason, applied: true, boName: ensured.boName || boName };
+      return {
+        source: ensured.reason,
+        applied: true,
+        boName: ensured.boName || boName,
+        sourceHint: ensured.sourceHint || allowlistSourceCache.get(boName)?.sourceHint || ''
+      };
     }
   }
 
@@ -221,7 +378,12 @@ function bootstrapAllowlists() {
   if (allowlistConfigCache.size > 0 && boName) {
     const current = resolveAllowlistConfig(boName);
     if (current?.boName === boName) {
-      return { source: 'cache', applied: true, boName };
+      return {
+        source: 'cache',
+        applied: true,
+        boName,
+        sourceHint: allowlistSourceCache.get(boName)?.sourceHint || ''
+      };
     }
   }
 
@@ -229,14 +391,8 @@ function bootstrapAllowlists() {
 }
 
 function requestAllowlistFromBridge() {
-  if (!isAutoAllowlistEnabled()) {
-    return;
-  }
-  try {
-    window.postMessage({ channel: 'StateScopeInternal', type: 'requestAllowlist' }, window.location.origin);
-  } catch {
-    // ignore
-  }
+  // 扩展不再打包 allowlists/*.json；保留空实现以免旧调试代码调用报错
+  return;
 }
 
 function drainPendingAllowlists() {
@@ -250,7 +406,7 @@ function drainPendingAllowlists() {
   let applied = 0;
   while (pending.length) {
     const config = pending.shift();
-    if (applyAllowlistConfig(config)) {
+    if (applyAllowlistConfig(config, { source: 'pending' })) {
       applied += 1;
     }
   }
@@ -272,6 +428,7 @@ function clearAllowlist(boName) {
   }
   allowlistCache.delete(target);
   allowlistConfigCache.delete(target);
+  allowlistSourceCache.delete(target);
   scopeLog(`${LOG_PREFIX} allowlist cleared: ${target} (Diff 恢复全量)`);
   return true;
 }
@@ -318,12 +475,8 @@ function handleBoSwitch(oldBo, newBo) {
   resetEpochCounter();
   epochManager = null;
 
-  for (const key of [...allowlistCache.keys()]) {
-    if (key !== newBo) {
-      allowlistCache.delete(key);
-      allowlistConfigCache.delete(key);
-    }
-  }
+  // 多 Tab：保留各 BO 已加载的 allowlist 缓存，只切换「当前」绑定（不再清空其它 BO）
+  // 若其它 Tab 再次点开，可直接 listLoadedAllowlists 命中，无需等再次 publish
 
   if (isConsoleOutputEnabled()) {
     scopeLog(`${LOG_PREFIX} BO switched: ${oldBo} → ${newBo}, session=${newToken}`);
@@ -344,14 +497,24 @@ function refreshRuntimeTargets(discoverOptions) {
   const meta = getRuntimeMeta(runtimeContext);
   runtimeContext.profile = meta.profile;
   runtimeContext.profileDetection = meta.profileDetection;
-  runtimeContext.boName = meta.boName;
+  // 强制与路由对齐，避免 discover 返回残留 bizApplication.boName
+  runtimeContext.boName = meta.boName || routeBo || runtimeContext.boName;
 
-  if (prevBoName && meta.boName && prevBoName !== meta.boName) {
-    handleBoSwitch(prevBoName, meta.boName);
+  if (prevBoName && runtimeContext.boName && prevBoName !== runtimeContext.boName) {
+    handleBoSwitch(prevBoName, runtimeContext.boName);
+    ensureAllowlistForBoName(runtimeContext.boName);
+    bootstrapScenarioForRuntime(runtimeContext.boName);
+    publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
+    if (isConsoleOutputEnabled()) {
+      console.info(
+        `${LOG_PREFIX} active | boName=${runtimeContext.boName} | profile=${runtimeContext.profile} (switched)`
+      );
+    }
+    return runtimeContext;
   }
 
-  if (meta.boName) {
-    ensureAllowlistForBoName(meta.boName);
+  if (runtimeContext.boName) {
+    ensureAllowlistForBoName(runtimeContext.boName);
   }
   return runtimeContext;
 }
@@ -462,7 +625,7 @@ function ensureStateScopeApi() {
   apiInstalled = true;
   window.__StateScope__ = {
     installed: false,
-    version: '0.8.20',
+    version: '0.8.32',
     mode: 'P2-lowcode-capture',
     getMeta: () => getRuntimeMeta(runtimeContext),
     getDiagnostics: () => getActivationDiagnostics(runtimeContext),
@@ -485,19 +648,23 @@ function ensureStateScopeApi() {
     },
     getAllowlist: () => resolveAllowlistPathSet(getRuntimeMeta(runtimeContext).boName),
     getAllowlistConfig: () => getAllowlistConfigForRuntime(),
+    getAllowlistSource: () => getAllowlistSourceMeta(),
+    diagnoseAllowlistScan: (boName) =>
+      diagnoseAllowlistScan(boName || getRuntimeMeta(runtimeContext).boName),
     listLoadedAllowlists: () => [...allowlistConfigCache.keys()],
-    applyAllowlistConfig(config) {
-      return applyAllowlistConfig(config);
+    applyAllowlistConfig(config, meta) {
+      return applyAllowlistConfig(config, meta);
     },
     reloadAllowlist() {
       readAllowlistFromDom();
       drainPendingAllowlists();
-      requestAllowlistFromBridge();
+      const boName = getRuntimeMeta(runtimeContext).boName;
       const boot = bootstrapAllowlists();
       return {
         config: getAllowlistConfigForRuntime(),
         loadedKeys: [...allowlistConfigCache.keys()],
-        boot
+        boot,
+        source: getAllowlistSourceMeta(boName)
       };
     },
     clearAllowlist(boName) {
@@ -522,13 +689,18 @@ function ensureStateScopeApi() {
     setProfileMode(mode) {
       return setForcedProfileMode(mode);
     },
-    getScenarioTag: () => getScenarioTag(),
-    setScenarioTag: (tag) => setScenarioTag(tag),
-    getScenarioCatalog: () => getScenarioCatalog(getRuntimeMeta(runtimeContext).boName),
-    getScenarioCatalogPack: () => getScenarioCatalogPack(getRuntimeMeta(runtimeContext).boName),
-    getScenarioCatalogSummary: () => getScenarioCatalogSummary(getRuntimeMeta(runtimeContext).boName),
-    getScenarioDiagnostics: () => getScenarioDiagnostics(getRuntimeMeta(runtimeContext).boName),
-    reconcileScenarioTag: () => reconcileScenarioTagForBo(getRuntimeMeta(runtimeContext).boName),
+    getScenarioTag: () => getScenarioTag(getRuntimeMeta(runtimeContext).boName),
+    setScenarioTag: (tag) => setScenarioTag(tag, getRuntimeMeta(runtimeContext).boName),
+    ensureActiveScenarioTag: (boName) =>
+      ensureActiveScenarioTag(boName || getRuntimeMeta(runtimeContext).boName),
+    getScenarioCatalog: (boName) => getScenarioCatalog(boName || getRuntimeMeta(runtimeContext).boName),
+    getScenarioCatalogPack: (boName) => getScenarioCatalogPack(boName || getRuntimeMeta(runtimeContext).boName),
+    getScenarioCatalogSummary: (boName) =>
+      getScenarioCatalogSummary(boName || getRuntimeMeta(runtimeContext).boName),
+    getScenarioDiagnostics: (boName) =>
+      getScenarioDiagnostics(boName || getRuntimeMeta(runtimeContext).boName),
+    reconcileScenarioTag: (boName) =>
+      reconcileScenarioTagForBo(boName || getRuntimeMeta(runtimeContext).boName),
     applyScenarioCatalog(config, boName) {
       return applyScenarioCatalog(config, boName);
     },
@@ -551,6 +723,19 @@ function ensureStateScopeApi() {
         { force: true }
       );
       return { ok, hooks: getActivationDiagnostics(runtimeContext) };
+    },
+    /** 重新采集空白/初始态（setup「新增空白单据」时用） */
+    resampleBootstrap: () => {
+      const em = ensureEpochManager();
+      const ok = requestBootstrapResample(
+        em,
+        () => ({
+          viewModel: runtimeContext.viewModel,
+          allowlistConfig: getAllowlistConfigForRuntime()
+        }),
+        discoverMdfBizApplication(runtimeContext.viewModel)
+      );
+      return { ok, bootstrap: getBootstrapStatus() };
     },
     probeShadow: () =>
       probeLowcodeShadow(
@@ -587,7 +772,6 @@ function markInstalled() {
   const scenarioBoot = bootstrapScenarioForRuntime(meta.boName);
   publishRuntimeToPanel(buildRuntimePayload(runtimeContext));
   republishCachedPanelState();
-  requestAllowlistFromBridge();
   mirrorStateScopeApiToTop();
 
   if (isConsoleOutputEnabled()) {
@@ -736,6 +920,44 @@ function startPolling() {
   }, POLL_INTERVAL_MS);
 }
 
+function installRouteBoWatch() {
+  if (window.__stateScopeRouteBoWatch__) {
+    return;
+  }
+  window.__stateScopeRouteBoWatch__ = true;
+  let lastRouteKey = `${location.pathname}${location.search}${location.hash}`;
+  const onRouteChange = () => {
+    const nextRouteKey = `${location.pathname}${location.search}${location.hash}`;
+    const routeChanged = nextRouteKey !== lastRouteKey;
+    const prevBo = runtimeContext.boName;
+    lastRouteKey = nextRouteKey;
+    lastDiscoverAt = 0;
+    refreshRuntimeTargets({ deepScan: true });
+    // 同 BO 路由变化（列表→新增空白）：重新 bootstrap，否则时间线不会有 init Epoch
+    if (
+      routeChanged &&
+      prevBo &&
+      runtimeContext.boName === prevBo &&
+      runtimeContext.profile === 'lowcode' &&
+      epochManager
+    ) {
+      requestBootstrapResample(epochManager, () => ({
+        viewModel: runtimeContext.viewModel,
+        allowlistConfig: getAllowlistConfigForRuntime()
+      }), discoverMdfBizApplication(runtimeContext.viewModel));
+      if (isConsoleOutputEnabled()) {
+        scopeLog(`${LOG_PREFIX} same-BO route change → resample bootstrap`);
+      }
+    }
+    // BO 切换后重新装 hook / 重新 active
+    if (isBizDebugEnabled()) {
+      activateIfReady();
+    }
+  };
+  window.addEventListener('hashchange', onRouteChange);
+  window.addEventListener('popstate', onRouteChange);
+}
+
 function bootInjector() {
   if (!isBizDebugEnabled()) {
     if (!noDebugNoticeShown && isConsoleOutputEnabled()) {
@@ -754,6 +976,8 @@ function bootInjector() {
     );
   }
 
+  installAllowlistRegistryBridge();
+  installRouteBoWatch();
   maybeDiscoverRuntimeTargets();
   ensureStateScopeApi();
   bootstrapAllowlists();
@@ -766,7 +990,7 @@ window.addEventListener('message', (event) => {
   }
   if (event.data?.channel === 'StateScopeAllowlist' && event.data.config) {
     if (isAutoAllowlistEnabled()) {
-      applyAllowlistConfig(event.data.config);
+      applyAllowlistConfig(event.data.config, { source: 'bridge' });
     }
   }
   if (event.data?.channel === 'StateScopeAllowlistClear') {

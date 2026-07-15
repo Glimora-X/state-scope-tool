@@ -1,4 +1,10 @@
-import goodsIssueL3 from '../../scenarios/GoodsIssue.L3.v1.json';
+import goodsIssueL3 from '../../scenarios/GoodsIssue.L3.v1.json' with { type: 'json' };
+import {
+  attachCatalogEpoch,
+  scenarioPackFingerprint
+} from './scenario-catalog-epoch.js';
+
+export { computeCatalogEpoch, scenarioPackFingerprint } from './scenario-catalog-epoch.js';
 
 function stripStateSuffix(path) {
   return String(path).replace(/\.(visible|disabled)$/, '');
@@ -98,7 +104,16 @@ function normalizeSsotScenarioItem(item, index, pack) {
   const tag = slugTag(id, index);
   let watchFields = watchFieldsFromAssert(item.assertFields);
   if (!watchFields.length && Array.isArray(item.allowlistBatch) && item.allowlistBatch.length) {
-    watchFields = watchFieldsFromCompareFields(pack.stateScopeProfile?.compareFields);
+    let fromCompare = watchFieldsFromCompareFields(pack.stateScopeProfile?.compareFields);
+    // 仅「空白打开」类：无 assertFields 时不应把明细 {uuid} 作为 PASS 门槛（无行则永远无法就绪）
+    // 例如 OS-S01；带保存/审核/选单/明细动作的（如 OS-S05）仍保留完整 compareFields
+    const actionsText = [...(item.actions || []), item.setup || ''].join(' ');
+    const isBlankInit =
+      /空白|打开单据|不录入/.test(actionsText) && !/明细|选单|生单|保存|审核/.test(actionsText);
+    if (isBlankInit) {
+      fromCompare = fromCompare.filter((w) => !String(w.path || '').includes('{uuid}'));
+    }
+    watchFields = fromCompare;
   }
 
   const steps = [];
@@ -128,6 +143,24 @@ function normalizeSsotScenarioItem(item, index, pack) {
 }
 
 function normalizeToolScenarioItem(item) {
+  const watchFields = Array.isArray(item.watchFields) ? [...item.watchFields] : [];
+  // 存量已上传包：仅修正 os-s01，去掉空白单不可达的明细 {uuid} watch，避免永远无法 PASS/签字
+  if (
+    item.tag === 'os-s01' &&
+    watchFields.some((w) => String(w?.path || '').includes('{uuid}'))
+  ) {
+    const filtered = watchFields.filter((w) => !String(w?.path || '').includes('{uuid}'));
+    return {
+      tag: item.tag,
+      order: item.order ?? 0,
+      group: item.group || '',
+      label: item.label || item.tag,
+      checkpoint: item.checkpoint || '',
+      signOffMode: item.signOffMode === 'manual' ? 'manual' : 'allowlist',
+      watchFields: filtered,
+      steps: Array.isArray(item.steps) ? item.steps : []
+    };
+  }
   return {
     tag: item.tag,
     order: item.order ?? 0,
@@ -135,7 +168,7 @@ function normalizeToolScenarioItem(item) {
     label: item.label || item.tag,
     checkpoint: item.checkpoint || '',
     signOffMode: item.signOffMode === 'manual' ? 'manual' : 'allowlist',
-    watchFields: Array.isArray(item.watchFields) ? item.watchFields : [],
+    watchFields,
     steps: Array.isArray(item.steps) ? item.steps : []
   };
 }
@@ -144,6 +177,8 @@ function normalizeToolScenarioItem(item) {
  * 同时接受：
  * 1) 工具 L3 包（tag / steps / watchFields）
  * 2) 领域 SSOT（id / setup / actions / assertFields / stateScopeProfile）
+ *
+ * 出口始终挂 catalogEpoch（规则体级身份）。跨 catalogEpoch 禁止自动继承签字进度。
  */
 export function normalizeScenarioPack(pack) {
   if (!pack?.scenarios?.length) {
@@ -151,7 +186,12 @@ export function normalizeScenarioPack(pack) {
   }
 
   // 已归一化（Panel/SW 二次写入）：直接复用，避免 SSOT→tool 双次转换丢字段
-  if (pack.source === 'ssot-upload' || pack.source === 'tool-l3') {
+  if (
+    pack.source === 'ssot-upload' ||
+    pack.source === 'tool-l3' ||
+    pack.source === 'window-registry' ||
+    pack.source === 'local-upload'
+  ) {
     const scenarios = pack.scenarios
       .filter((item) => item?.tag)
       .map((item) => normalizeToolScenarioItem(item));
@@ -159,7 +199,26 @@ export function normalizeScenarioPack(pack) {
       return null;
     }
     scenarios.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-    return {
+    // 保留 assertFields / allowlistBatch 供 epoch（normalizeToolScenarioItem 可能丢掉）
+    const merged = scenarios.map((item, index) => {
+      const raw = pack.scenarios.find((s) => s?.tag === item.tag) || pack.scenarios[index] || {};
+      return {
+        ...item,
+        assertFields: Array.isArray(item.assertFields)
+          ? item.assertFields
+          : Array.isArray(raw.assertFields)
+            ? raw.assertFields
+            : [],
+        allowlistBatch: Array.isArray(item.allowlistBatch)
+          ? item.allowlistBatch
+          : Array.isArray(raw.allowlistBatch)
+            ? raw.allowlistBatch
+            : [],
+        setup: item.setup || raw.setup || '',
+        actions: Array.isArray(item.actions) ? item.actions : Array.isArray(raw.actions) ? raw.actions : []
+      };
+    });
+    return attachCatalogEpoch({
       boName: pack.boName || '',
       version: pack.version || '',
       title: pack.title || pack.boName || '',
@@ -168,8 +227,8 @@ export function normalizeScenarioPack(pack) {
       profile: pack.profile || '',
       source: pack.source,
       stateScopeProfile: pack.stateScopeProfile || null,
-      scenarios
-    };
+      scenarios: merged
+    });
   }
 
   const ssot = isDomainSsotPack(pack);
@@ -188,17 +247,17 @@ export function normalizeScenarioPack(pack) {
     scenarios.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
 
-  return {
+  return attachCatalogEpoch({
     boName: pack.boName || '',
     version: pack.version || '',
     title: pack.title || pack.boName || '',
     allowlistVersion: pack.allowlistVersion || pack.allowlistRef || '',
     note: pack.note || (ssot ? '领域 SSOT 上传' : ''),
     profile: pack.profile || '',
-    source: ssot ? 'ssot-upload' : pack.source || 'tool-l3',
+    source: pack.source || (ssot ? 'ssot-upload' : 'tool-l3'),
     stateScopeProfile: pack.stateScopeProfile || null,
     scenarios
-  };
+  });
 }
 
 export function getBundledScenarioPack(boName) {
@@ -287,6 +346,8 @@ export function summarizeScenarioPack(pack) {
     allowlistVersion: normalized.allowlistVersion,
     note: normalized.note,
     source: normalized.source,
-    scenarioCount: normalized.scenarios.length
+    scenarioCount: normalized.scenarios.length,
+    catalogEpoch: normalized.catalogEpoch || '',
+    fingerprint: normalized.catalogEpoch || scenarioPackFingerprint(normalized)
   };
 }

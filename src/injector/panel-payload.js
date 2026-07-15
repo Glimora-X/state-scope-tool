@@ -13,7 +13,7 @@ import {
   formatEpochTime,
   groupChangedByBusiness
 } from './panel-view-model.js';
-import { getScenarioTag, getScenarioCatalogPack } from './scenario-context.js';
+import { getScenarioTag, getScenarioCatalogPack, ensureActiveScenarioTag } from './scenario-context.js';
 import { getRuntimeMeta } from './detect.js';
 import { getHookLiveness } from './hook-registry.js';
 import {
@@ -208,7 +208,8 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
       hasDetailKeys(epoch.finalSnap, epoch.changedSample) || (epoch.scope?.detailRowsInChangedSet || 0) > 0,
     allowlistMeta: buildAllowlistMeta(allowlistConfig),
     allowlistFieldResults: buildAllowlistFieldResults(allowlistConfig, rawDiffs, hasNewChain),
-    scenarioTag: getScenarioTag() || '',
+    // 无 tag 的 epoch 永不进入场景累计 → Checklist 永久「未开始」
+    scenarioTag: ensureActiveScenarioTag(meta.boName || '') || getScenarioTag(meta.boName || '') || '',
     isBootstrap: !!epoch.isBootstrap,
     shadowCaptured: epoch.shadowCaptured !== undefined ? !!epoch.shadowCaptured : hasNewChain,
     bootstrapQuality: epoch.bootstrapQuality || undefined,
@@ -223,6 +224,17 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
 export function buildRuntimePayload(runtimeContext) {
   const meta = getRuntimeMeta(runtimeContext);
   const catalogPack = meta.boName ? getScenarioCatalogPack(meta.boName) : null;
+  // 仅传摘要：完整 scenarios 仍由 Panel SS_APPLY 同步。
+  // 每轮 Epoch 夹带整包会反复触发 SW 对账/重建，拖死时间线与场景累计。
+  const catalogHint = catalogPack?.scenarios?.length
+    ? {
+        boName: catalogPack.boName || meta.boName || '',
+        version: catalogPack.version || '',
+        catalogEpoch: catalogPack.catalogEpoch || '',
+        source: catalogPack.source || '',
+        scenarioCount: catalogPack.scenarios.length
+      }
+    : undefined;
 
   return {
     meta,
@@ -239,7 +251,9 @@ export function buildRuntimePayload(runtimeContext) {
       profileDetection: meta.profileDetection || null
     },
     hookLiveness: getHookLiveness(),
-    scenarioCatalogPack: catalogPack || undefined,
+    scenarioCatalogHint: catalogHint,
+    // 兼容旧 SW：无 scenarios 时不会走进整包 apply
+    scenarioCatalogPack: catalogHint,
     updatedAt: Date.now()
   };
 }

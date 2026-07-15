@@ -1,4 +1,4 @@
-const PANEL_VERSION = '0.8.20';
+const PANEL_VERSION = '0.8.32';
 
 const ZH = window.StateScopeZh?.ZH || { epoch: '观测轮次', epochTimeline: '观测时间线' };
 const severityZh = window.StateScopeZh?.severityZh || ((s) => s || '—');
@@ -222,10 +222,18 @@ function mergeScenarioCatalogIntoReport(catalog, report) {
   if (!catalog?.scenarios?.length) {
     return report || null;
   }
+  // 仅当两侧都有 catalogEpoch 且不一致时禁止继承；缺字段视为同包（兼容旧会话）
+  const bothHaveEpoch = !!(report?.catalogEpoch && catalog.catalogEpoch);
+  const epochChanged = bothHaveEpoch && report.catalogEpoch !== catalog.catalogEpoch;
+  const sameBoVersion =
+    !!report &&
+    (!report.boName || !catalog.boName || report.boName === catalog.boName) &&
+    (!report.catalogVersion || !catalog.version || report.catalogVersion === catalog.version);
+  const inherit = report && !epochChanged && (bothHaveEpoch || sameBoVersion) ? report : null;
   const scenarios = {};
   const sorted = [...catalog.scenarios].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   for (const meta of sorted) {
-    scenarios[meta.tag] = buildScenarioRecordFromMeta(meta, report?.scenarios?.[meta.tag]);
+    scenarios[meta.tag] = buildScenarioRecordFromMeta(meta, inherit?.scenarios?.[meta.tag]);
   }
   const list = Object.values(scenarios);
   const summary = {
@@ -239,11 +247,13 @@ function mergeScenarioCatalogIntoReport(catalog, report) {
   return {
     boName: catalog.boName || report?.boName || null,
     catalogVersion: catalog.version || report?.catalogVersion || null,
+    catalogEpoch: catalog.catalogEpoch || null,
+    catalogSource: catalog.source || report?.catalogSource || null,
     catalogTitle: catalog.title || report?.catalogTitle || null,
     allowlistVersion: catalog.allowlistVersion || report?.allowlistVersion || null,
-    hasNewChainObserved: report?.hasNewChainObserved || false,
-    ignoreEpochsBefore: report?.ignoreEpochsBefore || 0,
-    updatedAt: report?.updatedAt || Date.now(),
+    hasNewChainObserved: inherit?.hasNewChainObserved || false,
+    ignoreEpochsBefore: inherit?.ignoreEpochsBefore || 0,
+    updatedAt: Date.now(),
     summary,
     scenarios
   };
@@ -256,8 +266,13 @@ function hydrateScenarioReportFromCatalog() {
   if (!appState) {
     appState = { runtime: null, epochs: [], selectedEpochId: null, issues: [], settings: {} };
   }
-  if (isLegacyScenarioReport(appState.scenarioReport) || !appState.scenarioReport) {
-    appState.scenarioReport = mergeScenarioCatalogIntoReport(ui.scenarioCatalog, appState.scenarioReport);
+  const report = appState.scenarioReport;
+  const epochChanged =
+    ui.scenarioCatalog.catalogEpoch &&
+    report?.catalogEpoch &&
+    ui.scenarioCatalog.catalogEpoch !== report.catalogEpoch;
+  if (isLegacyScenarioReport(report) || !report || epochChanged) {
+    appState.scenarioReport = mergeScenarioCatalogIntoReport(ui.scenarioCatalog, report);
   }
 }
 
@@ -320,18 +335,82 @@ function rememberScenarioCatalog(catalog) {
   if (!catalog?.scenarios?.length) {
     return null;
   }
+  const nextKey = catalogSyncKey(catalog);
+  const keyChanged = nextKey !== ui.lastSyncedScenarioCatalogKey;
   ui.scenarioCatalog = catalog;
   if (!appState) {
     appState = { runtime: null, epochs: [], selectedEpochId: null, issues: [], settings: {} };
   }
-  appState.scenarioReport = mergeScenarioCatalogIntoReport(catalog, appState.scenarioReport);
-  ui.lastSyncedScenarioCatalogKey = `${catalog.boName || ''}:${catalog.version || ''}`;
+  // 仅目录身份变化时重挂骨架；每次 loadState 都 merge 会抹掉 SW 已累计进度并卡刷新
+  if (keyChanged || !appState.scenarioReport?.scenarios || !Object.keys(appState.scenarioReport.scenarios).length) {
+    appState.scenarioReport = mergeScenarioCatalogIntoReport(catalog, appState.scenarioReport);
+  } else if (!appState.scenarioReport.catalogEpoch && catalog.catalogEpoch) {
+    appState.scenarioReport.catalogEpoch = catalog.catalogEpoch;
+    appState.scenarioReport.catalogSource = catalog.source || appState.scenarioReport.catalogSource;
+  }
+  ui.lastSyncedScenarioCatalogKey = nextKey;
   const firstTag = [...catalog.scenarios].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0]?.tag;
   if (firstTag && (!ui.selectedScenarioTag || !catalog.scenarios.some((s) => s.tag === ui.selectedScenarioTag))) {
     ui.selectedScenarioTag = firstTag;
   }
-  lastRefreshFingerprint = '';
+  if (keyChanged) {
+    lastRefreshFingerprint = '';
+  }
   return appState.scenarioReport;
+}
+
+/** 对账键：catalogEpoch + source（① 与 ② 内容相同也不得 skip） */
+function catalogSyncKey(pack) {
+  if (!pack) {
+    return '';
+  }
+  const epoch = pack.catalogEpoch || scenarioPackFingerprint(pack);
+  return `${epoch}|${pack.source || ''}`;
+}
+
+/** panel 未打包 import；优先用 normalize 挂上的 catalogEpoch */
+function scenarioPackFingerprint(pack) {
+  if (pack?.catalogEpoch) {
+    return pack.catalogEpoch;
+  }
+  if (!pack?.scenarios?.length) {
+    return '';
+  }
+  const ids = pack.scenarios
+    .map((item) => item.tag || item.id || item.group || '')
+    .join(',');
+  return `${pack.boName || ''}|${pack.version || ''}|${pack.scenarios.length}|${ids}`;
+}
+
+async function pullScenarioCatalogFromPage(boName) {
+  const response = await evalInPage(`(function () {
+    ${RESOLVE_STATE_SCOPE}
+    var ss = __ssResolve();
+    var bo = ${JSON.stringify(boName || '')};
+    var raw = (window.__STATE_SCOPE_SCENARIOS__ && bo)
+      ? window.__STATE_SCOPE_SCENARIOS__[bo]
+      : null;
+    var pack = ss && ss.getScenarioCatalogPack ? ss.getScenarioCatalogPack(bo || undefined) : null;
+    return {
+      raw: raw || null,
+      pack: pack || null,
+      source: (pack && pack.source) || (raw ? 'window-registry' : (pack ? 'page' : ''))
+    };
+  })()`);
+  if (!response.ok) {
+    return null;
+  }
+  const result = response.result;
+  const pack = result?.pack || null;
+  if (!pack?.scenarios?.length) {
+    return null;
+  }
+  return {
+    pack,
+    raw: result.raw,
+    source: result.source || pack.source || 'page',
+    fingerprint: catalogSyncKey(pack)
+  };
 }
 
 function slimEpochForBackground(epoch) {
@@ -529,8 +608,26 @@ async function restoreScenarioCatalogToPageIfNeeded() {
   if (!pack?.scenarios?.length || tabId == null) {
     return false;
   }
-  const pageCheck = await evalInPage(`window.__StateScope__?.getScenarioCatalogSummary?.() || null`);
-  if (pageCheck.ok && pageCheck.result?.scenarioCount) {
+  // 显式带 boName：无参 summary 在 runtime 未就绪时恒为 null，会每轮误灌 catalog 卡死 refresh
+  const pageCheck = await evalInPage(`(function () {
+    var ss = window.__StateScope__;
+    if (!ss) return null;
+    var bo = ${JSON.stringify(pack.boName || '')};
+    if (ss.getScenarioCatalogSummary) {
+      return ss.getScenarioCatalogSummary(bo || undefined) || ss.getScenarioCatalogSummary() || null;
+    }
+    var packOnPage = ss.getScenarioCatalogPack ? ss.getScenarioCatalogPack(bo || undefined) : null;
+    return packOnPage && packOnPage.scenarios
+      ? { scenarioCount: packOnPage.scenarios.length, catalogEpoch: packOnPage.catalogEpoch || '' }
+      : null;
+  })()`);
+  if (
+    pageCheck.ok &&
+    pageCheck.result?.scenarioCount &&
+    (!pack.catalogEpoch ||
+      !pageCheck.result.catalogEpoch ||
+      pageCheck.result.catalogEpoch === pack.catalogEpoch)
+  ) {
     return false;
   }
   const pageApply = await applyScenarioCatalogToPage(pack);
@@ -783,24 +880,46 @@ function bindAllowlistUiFromEvalResult(evalResult, boName) {
   }
   const result = evalResult.result;
   ui.lastSyncedBoName = result.boName || boName || ui.lastSyncedBoName;
+  const source = result.source || result.boot?.source || '';
+  const sourceHint = result.sourceHint || result.boot?.sourceHint || '';
   ui.allowlistBinding = {
     boName: ui.lastSyncedBoName,
     version: result.version,
     fieldCount: result.fieldCount,
-    active: result.active !== false
+    active: result.active !== false,
+    source,
+    sourceHint
   };
   ui.pageSettings = {
     ...(ui.pageSettings || {}),
     allowlistActive: result.active !== false,
     allowlistBoName: ui.allowlistBinding.boName,
     allowlistVersion: ui.allowlistBinding.version,
-    allowlistFieldCount: ui.allowlistBinding.fieldCount
+    allowlistFieldCount: ui.allowlistBinding.fieldCount,
+    allowlistSource: source,
+    allowlistSourceHint: sourceHint
   };
   lastRefreshFingerprint = '';
+  const sourcePart = formatAllowlistSourceLabel(source, sourceHint);
   ui.settingsMessage = result.active !== false ?
-      `allowlist 已绑定：${result.boName} v${result.version || '—'}（${result.fieldCount || 0} 字段）`
+      `allowlist 已绑定：${result.boName} v${result.version || '—'}（${result.fieldCount || 0} 字段）${sourcePart}`
     : `allowlist 已写入但未激活，boName=${result.boName || '?'}`;
   return { ok: true, ...result };
+}
+
+function formatAllowlistSourceLabel(source, sourceHint) {
+  if (!source) {
+    return '';
+  }
+  if (source === 'window-registry') {
+    return sourceHint
+      ? ` · 来源 window-registry · ${sourceHint}`
+      : ' · 来源 window-registry（领域自注册）';
+  }
+  if (source === 'webpack-source') {
+    return sourceHint ? ` · 来源 webpack-source · ${sourceHint}` : ' · 来源 webpack-source';
+  }
+  return ` · 来源 ${source}`;
 }
 
 function syncAllowlistUiFromPageSettings(ps, boName) {
@@ -816,18 +935,23 @@ function syncAllowlistUiFromPageSettings(ps, boName) {
     boName: ps.allowlistBoName,
     version: ps.allowlistVersion,
     fieldCount: ps.allowlistFieldCount,
-    active: true
+    active: true,
+    source: ps.allowlistSource || '',
+    sourceHint: ps.allowlistSourceHint || ''
   };
   ui.pageSettings = {
     ...(ui.pageSettings || {}),
     allowlistActive: true,
     allowlistBoName: ps.allowlistBoName,
     allowlistVersion: ps.allowlistVersion,
-    allowlistFieldCount: ps.allowlistFieldCount
+    allowlistFieldCount: ps.allowlistFieldCount,
+    allowlistSource: ps.allowlistSource || '',
+    allowlistSourceHint: ps.allowlistSourceHint || ''
   };
   lastRefreshFingerprint = '';
-  ui.settingsMessage = `allowlist 已绑定：${ps.allowlistBoName} v${ps.allowlistVersion || '—'}（${ps.allowlistFieldCount || 0} 字段）`;
-  return { ok: true, reason: 'page-active', boName: ps.allowlistBoName, source: 'page-read' };
+  const sourcePart = formatAllowlistSourceLabel(ps.allowlistSource, ps.allowlistSourceHint);
+  ui.settingsMessage = `allowlist 已绑定：${ps.allowlistBoName} v${ps.allowlistVersion || '—'}（${ps.allowlistFieldCount || 0} 字段）${sourcePart}`;
+  return { ok: true, reason: 'page-active', boName: ps.allowlistBoName, source: ps.allowlistSource || 'page-read' };
 }
 
 async function syncAllowlistViaPageInjector(boName) {
@@ -840,11 +964,21 @@ async function syncAllowlistViaPageInjector(boName) {
     var reload = ss.reloadAllowlist();
     var config = reload && reload.config;
     if (!config || !config.fields || !config.fields.length) {
+      var expectedBo = ${JSON.stringify(boName || '')};
+      var diag = ss.diagnoseAllowlistScan ? ss.diagnoseAllowlistScan(expectedBo || undefined) : null;
+      var hint = expectedBo
+        ? ('未从页面 webpack 找到与 ' + expectedBo + ' 匹配的 *.allowlist.ts，请到设置页导入领域白名单')
+        : '未从页面 webpack 找到 *.allowlist.ts，请到设置页导入领域白名单';
+      if (diag && !diag.requireCount) {
+        hint += '（未捕获 __webpack_require__；Sources 的 webpack:// 仅是 source map）';
+      }
       return {
         ok: false,
-        error: 'injector 内置 allowlist 未绑定',
+        error: hint,
+        reason: (reload && reload.boot && reload.boot.source) || 'need-import',
         boot: reload && reload.boot,
         loadedKeys: reload && reload.loadedKeys,
+        diagnose: diag,
         stateScopeVersion: ss.version || ''
       };
     }
@@ -856,13 +990,16 @@ async function syncAllowlistViaPageInjector(boName) {
         boName: config.boName
       };
     }
+    var srcMeta = (reload && reload.source) || (ss.getAllowlistSource ? ss.getAllowlistSource() : null) || {};
+    var bootSource = (reload && reload.boot && reload.boot.source) || '';
     return {
       ok: true,
       active: true,
       version: config.version || '',
       fieldCount: config.fields.length,
       boName: config.boName,
-      source: (reload && reload.boot && reload.boot.source) || 'bundled'
+      source: srcMeta.source || bootSource || 'bundled',
+      sourceHint: srcMeta.sourceHint || reload && reload.boot && reload.boot.sourceHint || ''
     };
   })()`);
   if (!evalResult.ok) {
@@ -886,6 +1023,7 @@ async function readPageSettings(options = {}) {
     ${RESOLVE_STATE_SCOPE}
     var ss = __ssResolve();
     var cfg = ss && ss.getAllowlistConfig ? ss.getAllowlistConfig() : null;
+    var srcMeta = ss && ss.getAllowlistSource ? ss.getAllowlistSource() : null;
     var allowlistFields = ${allowlistFieldsExpr};
     return {
       bizDebug: localStorage.getItem('bizDebug') === 'true',
@@ -902,11 +1040,13 @@ async function readPageSettings(options = {}) {
       allowlistVersion: (cfg && cfg.version) || '',
       allowlistBoName: (cfg && cfg.boName) || '',
       allowlistNote: (cfg && cfg.note) || '',
+      allowlistSource: (srcMeta && srcMeta.source) || '',
+      allowlistSourceHint: (srcMeta && srcMeta.sourceHint) || '',
       allowlistFields: allowlistFields,
       loadedAllowlistKeys: (ss && ss.listLoadedAllowlists ? ss.listLoadedAllowlists() : []) || [],
       pageMeta: (ss && ss.getMeta ? ss.getMeta() : null) || null,
       pageSyncSummary: (ss && ss.getPanelSyncSummary ? ss.getPanelSyncSummary() : null) || null,
-      scenarioTag: (ss && ss.getScenarioTag ? ss.getScenarioTag() : null) || localStorage.getItem('stateScopeScenario') || '',
+      scenarioTag: (ss && ss.getScenarioTag ? ss.getScenarioTag() : null) || '',
       scenarioCatalogSummary: (ss && ss.getScenarioCatalogSummary ? ss.getScenarioCatalogSummary() : null) || null,
       relayBroken: ss && ss.extensionRelayBroken === true,
       relayError: (ss && ss.extensionRelayError) || ''
@@ -1074,10 +1214,19 @@ function getAllowlistMetaLine() {
   const version = report?.allowlistVersion || binding.version || ps.allowlistVersion;
   const fieldCount = report?.summary?.totalFields || binding.fieldCount || ps.allowlistFieldCount;
   const active = ps.allowlistActive || binding.active;
+  const source = binding.source || ps.allowlistSource || '';
+  const sourceHint = binding.sourceHint || ps.allowlistSourceHint || '';
 
   if (boName || active) {
     const fieldPart = fieldCount ? `${fieldCount} 字段 · ` : '';
-    return `${boName || '—'} · 字段清单 v${version || '—'} · ${fieldPart}升级后 ${report?.hasNewChainObserved ? '已观测' : '影子未写入'}`;
+    const sourcePart = source ?
+        source === 'webpack-source' ?
+          sourceHint ?
+            `webpack-source · ${sourceHint} · `
+          : 'webpack-source · '
+        : `${source} · `
+      : '';
+    return `${boName || '—'} · ${sourcePart}字段清单 v${version || '—'} · ${fieldPart}升级后 ${report?.hasNewChainObserved ? '已观测' : '影子未写入'}`;
   }
   return '字段清单未绑定';
 }
@@ -1170,13 +1319,21 @@ async function syncAllowlistToPage({ force = false } = {}) {
 
   await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
   const boName = await resolveBoNameForAllowlist();
+  // 切单后 pageMeta.boName 变了：强制按当前 BO 重绑 UI（避免 lastSynced 残留上一单）
+  if (
+    boName &&
+    ui.lastSyncedBoName &&
+    boName !== ui.lastSyncedBoName
+  ) {
+    ui.lastSyncedBoName = '';
+  }
   const fromPage = syncAllowlistUiFromPageSettings(ui.pageSettings, boName);
   if (fromPage?.ok) {
     return fromPage;
   }
 
   // 页面 injector 已绑定（bundled / bridge），无需 Panel 再 fetch
-  if (!force && ui.pageSettings?.allowlistActive) {
+  if (!force && ui.pageSettings?.allowlistActive && ui.pageSettings?.allowlistBoName === boName) {
     return { ok: true, reason: 'page-active' };
   }
 
@@ -1189,88 +1346,16 @@ async function syncAllowlistToPage({ force = false } = {}) {
     return injected;
   }
 
-  const candidates = boName ?
-      [
-        `${boName}.v1.json`,
-        `${boName}.v1.example.json`,
-        'OutsourceStockin.v1.json',
-        'OutsourceIssue.v1.json',
-        'GoodsIssue.v1.json'
-      ]
-    : [
-        'OutsourceStockin.v1.json',
-        'OutsourceIssue.v1.json',
-        'GoodsIssue.v1.json',
-        'GoodsIssue.v1.example.json'
-      ];
-
-  let lastFetchError = injected?.error || '';
-  let saw404 = false;
-
-  for (const fileName of candidates) {
-    try {
-      const url = chrome.runtime.getURL(`allowlists/${fileName}`);
-      const response = await fetch(url);
-      if (!response.ok) {
-        if (response.status === 404 && fileName === `${boName}.v1.json`) {
-          saw404 = true;
-        }
-        continue;
-      }
-      const config = await response.json();
-      if (boName && config.boName && config.boName !== boName) {
-        continue;
-      }
-      const evalResult = await evalJsonPayloadOnPage(
-        config,
-        `${RESOLVE_STATE_SCOPE}
-        var ss = __ssResolve();
-        if (!ss || !ss.applyAllowlistConfig) {
-          return { ok: false, error: 'injector 未就绪' };
-        }
-        var applied = ss.applyAllowlistConfig(config);
-        var activeCfg = ss.getAllowlistConfig ? ss.getAllowlistConfig() : null;
-        var active = !!(activeCfg && activeCfg.fields && activeCfg.fields.length);
-        return {
-          ok: applied,
-          active: active,
-          version: config.version,
-          fieldCount: (config.fields && config.fields.length) || 0,
-          boName: config.boName
-        };`
-      );
-      const bound = bindAllowlistUiFromEvalResult(evalResult, boName);
-      if (bound?.ok) {
-        return bound;
-      }
-      if (evalResult.result?.error) {
-        lastFetchError = evalResult.result.error;
-      } else if (evalResult.error) {
-        lastFetchError = evalResult.error;
-      }
-      if (force && evalResult.result?.error) {
-        ui.settingsMessage = evalResult.result.error;
-      }
-    } catch (error) {
-      lastFetchError = error?.message || String(error);
-    }
-  }
-
-  const retryInjected = await syncAllowlistViaPageInjector(boName);
-  if (retryInjected?.ok) {
-    return retryInjected;
-  }
-
+  // 扩展不再打包 allowlists/*.json；未命中 webpack → 引导设置页导入
+  const tip =
+    injected?.error ||
+    (boName ?
+      `未从页面 webpack 找到与 ${boName} 匹配的 *.allowlist.ts，请到设置页导入领域白名单`
+    : '未从页面 webpack 找到 *.allowlist.ts，请到设置页导入领域白名单');
   if (force) {
-    ui.settingsMessage = lastFetchError ?
-        lastFetchError
-      : saw404 ?
-          `${boName || '当前 BO'} allowlist 文件未打包进扩展，请 chrome://extensions 重载 StateScope 后 F5`
-        : boName ?
-            `未找到 ${boName} 的 allowlist（injector 内置与 allowlists/*.json 均未成功）`
-          : '未识别 boName，且默认 allowlist 加载失败';
+    ui.settingsMessage = tip;
   }
-  return { ok: false, reason: 'not-found', error: ui.settingsMessage || lastFetchError };
+  return { ok: false, reason: 'need-import', error: tip };
 }
 
 async function applyScenarioCatalogToPage(catalog) {
@@ -1325,7 +1410,7 @@ async function applyScenarioCatalogBundle(catalog) {
 
   const normalized = swResponse.catalog || catalog;
   rememberScenarioCatalog(normalized);
-  ui.lastSyncedScenarioCatalogKey = `${swResponse.boName}:${swResponse.version}`;
+  // lastSyncedScenarioCatalogKey 已在 rememberScenarioCatalog 用指纹写入
   if (swResponse.scenarioReport) {
     appState.scenarioReport = swResponse.scenarioReport;
     hydrateScenarioReportFromCatalog();
@@ -1369,21 +1454,14 @@ async function applyScenarioCatalogBundle(catalog) {
 }
 
 async function recoverScenarioCatalogForBo(boName) {
+  // 优先页面领域自注册 / injector pack，避免 ui.scenarioCatalog 旧上传压过 SSOT
   let catalog = null;
-  if (ui.scenarioCatalog?.scenarios?.length && ui.scenarioCatalog.boName === boName) {
-    catalog = ui.scenarioCatalog;
+  const fromPage = await pullScenarioCatalogFromPage(boName);
+  if (fromPage?.pack?.scenarios?.length) {
+    catalog = fromPage.pack;
   }
-  if (!catalog) {
-    try {
-      const pageResult = await evalInPage(
-        `window.__StateScope__?.getScenarioCatalogPack?.(${JSON.stringify(boName)}) || null`
-      );
-      if (pageResult.ok && pageResult.result?.scenarios?.length) {
-        catalog = pageResult.result;
-      }
-    } catch {
-      // fall through
-    }
+  if (!catalog && ui.scenarioCatalog?.scenarios?.length && ui.scenarioCatalog.boName === boName) {
+    catalog = ui.scenarioCatalog;
   }
   if (!catalog) {
     return null;
@@ -1404,7 +1482,7 @@ async function recoverScenarioCatalogForBo(boName) {
   }
   appState = appState || {};
   appState.scenarioCatalogPack = swResponse.catalog || catalog;
-  ui.lastSyncedScenarioCatalogKey = `${(swResponse.catalog || catalog).boName}:${(swResponse.catalog || catalog).version}`;
+  ui.lastSyncedScenarioCatalogKey = catalogSyncKey(swResponse.catalog || catalog);
   await loadState();
   if (!appState.scenarioCatalogPack?.scenarios?.length) {
     appState.scenarioCatalogPack = swResponse.catalog || catalog;
@@ -1423,7 +1501,34 @@ async function syncScenarioCatalogToBackground({ force = false, catalog = null }
 
   const boName = await resolveBoNameForAllowlist();
   const report = appState?.scenarioReport;
-  const expectedKey = `${boName || report?.boName || ''}:${report?.catalogVersion || ''}`;
+
+  // 领域自注册优先：catalogEpoch+source 对账；① 出现只在 source 未升到 window-registry 时强制推一次
+  if (boName) {
+    const fromPage = await pullScenarioCatalogFromPage(boName);
+    if (fromPage?.pack?.scenarios?.length) {
+      const pageKey = catalogSyncKey(fromPage.pack);
+      const uiKey = catalogSyncKey(ui.scenarioCatalog);
+      const swKey = catalogSyncKey(appState?.scenarioCatalogPack);
+      const forceAuthority =
+        fromPage.pack.source === 'window-registry' &&
+        appState?.scenarioCatalogPack?.source !== 'window-registry';
+      if (force || forceAuthority || pageKey !== uiKey || pageKey !== swKey || pageKey !== ui.lastSyncedScenarioCatalogKey) {
+        return applyScenarioCatalogBundle(fromPage.pack);
+      }
+      return {
+        ok: true,
+        reason: 'page-registry-synced',
+        boName,
+        version: fromPage.pack.version,
+        catalogEpoch: fromPage.pack.catalogEpoch,
+        source: fromPage.source
+      };
+    }
+  }
+
+  const expectedKey = catalogSyncKey(
+    appState?.scenarioCatalogPack || ui.scenarioCatalog || null
+  );
 
   // 仅当 SW 侧也确有 catalog 时才跳过；否则 Panel hydrate 出的就绪报告会掩盖「SW 丢包」
   const swHasCatalog = !!appState?.scenarioCatalogPack?.scenarios?.length;
@@ -1436,7 +1541,7 @@ async function syncScenarioCatalogToBackground({ force = false, catalog = null }
     isL3ScenarioReady(report) &&
     (swHasCatalog || syncedKeyMatches)
   ) {
-    ui.lastSyncedScenarioCatalogKey = expectedKey;
+    ui.lastSyncedScenarioCatalogKey = expectedKey || ui.lastSyncedScenarioCatalogKey;
     return { ok: true, reason: 'already-synced', boName: report.boName, version: report.catalogVersion };
   }
 
@@ -1474,7 +1579,7 @@ async function syncScenarioCatalogToBackground({ force = false, catalog = null }
         appState.scenarioReport = bootstrap.scenarioReport;
         hydrateScenarioReportFromCatalog();
       }
-      ui.lastSyncedScenarioCatalogKey = `${bootstrap.boName}:${bootstrap.version}`;
+      ui.lastSyncedScenarioCatalogKey = catalogSyncKey(bootstrap.catalog || ui.scenarioCatalog);
       await loadState();
       return bootstrap;
     }
@@ -1580,6 +1685,69 @@ async function resetCutoverReport() {
   showToast('已重置切流累计');
 }
 
+async function importAllowlistTsFile(file) {
+  if (!file) {
+    return { ok: false, error: '未选择文件' };
+  }
+  const name = String(file.name || '');
+  if (!/\.ts$/i.test(name)) {
+    return { ok: false, error: '请选择 .allowlist.ts 文件' };
+  }
+  const parseApi = window.StateScopeParseAllowlistTs;
+  if (!parseApi?.parseAllowlistTsSource) {
+    return { ok: false, error: '解析器未加载' };
+  }
+  let text;
+  try {
+    text = await file.text();
+  } catch (error) {
+    return { ok: false, error: error?.message || '读取文件失败' };
+  }
+  const parsed = parseApi.parseAllowlistTsSource(text);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  const pageBo = await resolveBoNameForAllowlist();
+  if (pageBo && parsed.config.boName && parsed.config.boName !== pageBo) {
+    return {
+      ok: false,
+      error: `文件 boName=${parsed.config.boName} 与当前页 ${pageBo} 不一致`
+    };
+  }
+  const evalResult = await evalJsonPayloadOnPage(
+    parsed.config,
+    `${RESOLVE_STATE_SCOPE}
+    var ss = __ssResolve();
+    if (!ss || !ss.applyAllowlistConfig) {
+      return { ok: false, error: 'injector 未就绪' };
+    }
+    var applied = ss.applyAllowlistConfig(config, {
+      source: 'settings-import',
+      sourceHint: ${JSON.stringify(name)}
+    });
+    var activeCfg = ss.getAllowlistConfig ? ss.getAllowlistConfig() : null;
+    var srcMeta = ss.getAllowlistSource ? ss.getAllowlistSource() : null;
+    return {
+      ok: applied,
+      active: !!(activeCfg && activeCfg.fields && activeCfg.fields.length),
+      version: config.version || '',
+      fieldCount: (config.fields && config.fields.length) || 0,
+      boName: config.boName,
+      source: (srcMeta && srcMeta.source) || 'settings-import',
+      sourceHint: (srcMeta && srcMeta.sourceHint) || ${JSON.stringify(name)}
+    };`
+  );
+  const bound = bindAllowlistUiFromEvalResult(evalResult, pageBo);
+  if (bound?.ok) {
+    showToast(ui.settingsMessage || 'allowlist 已导入');
+    return bound;
+  }
+  return {
+    ok: false,
+    error: evalResult.result?.error || evalResult.error || '导入失败'
+  };
+}
+
 async function clearAllowlistOnPage() {
   const boName = appState?.runtime?.meta?.boName || '';
   const expr = boName ?
@@ -1638,7 +1806,7 @@ async function setAutoAllowlistOnPage(enabled) {
 function renderCutoverTable(report) {
   const fields = report?.fields || [];
   if (!fields.length) {
-    return `<div class="empty">尚无字段清单累计。请确认 allowlists/*.json 已加载，并操作单据触发观测轮次。</div>`;
+    return `<div class="empty">尚无字段清单累计。请确认领域 *.allowlist.ts 已从页面 webpack 加载（或在设置页导入），并操作单据触发观测轮次。</div>`;
   }
 
   return `<div class="cutover-table-wrap">
@@ -2636,11 +2804,11 @@ function renderSettings() {
   }).join('');
 
   const allowlistStatus = ps.allowlistActive ?
-      `已绑定 · ${ps.allowlistFieldCount || 0} 字段${ps.allowlistVersion ? ` · v${ps.allowlistVersion}` : ''}${ps.allowlistBoName ? ` · ${ps.allowlistBoName}` : ''}`
+      `已绑定 · ${ps.allowlistFieldCount || 0} 字段${ps.allowlistVersion ? ` · v${ps.allowlistVersion}` : ''}${ps.allowlistBoName ? ` · ${ps.allowlistBoName}` : ''}${ps.allowlistSource ? ` · ${ps.allowlistSource}` : ''}${ps.allowlistSourceHint ? ` · ${ps.allowlistSourceHint}` : ''}`
     : ps.loadedAllowlistKeys?.length ?
         `injector 已加载 [${ps.loadedAllowlistKeys.join(', ')}]，当前 bo 未匹配`
       : ps.stateScopeInstalled ?
-          `injector ${ps.stateScopeVersion || '—'} 已挂载，allowlist 未绑定`
+          `未从页面 webpack 找到 *.allowlist.ts，请导入领域白名单`
         : 'injector 未挂载（bizDebug=true 后刷新）';
   const autoAllowlistOn = ps.stateScopeAutoAllowlist !== false;
   const profileMode = ps.stateScopeProfile || 'auto';
@@ -2696,15 +2864,18 @@ function renderSettings() {
     <div class="settings-row">
       <div>
         <div>stateScopeAutoAllowlist</div>
-        <div class="subtle">关闭后不再自动加载 allowlists/*.json，并清除当前过滤</div>
+        <div class="subtle">关闭后不再自动从 webpack 拾取 allowlist，并清除当前过滤</div>
       </div>
       <span class="chip ${autoAllowlistOn ? 'on' : 'off'}">${autoAllowlistOn ? '自动加载' : '已关闭'}</span>
     </div>
     <div class="settings-actions">
+      <button type="button" class="btn primary" id="import-allowlist-ts">导入 allowlist.ts</button>
+      <input type="file" id="import-allowlist-ts-input" accept=".ts,text/plain" hidden />
       <button type="button" class="btn" id="clear-allowlist">取消 allowlist（恢复全量 Diff）</button>
       <button type="button" class="btn" id="toggle-auto-allowlist">${autoAllowlistOn ? '关闭自动加载' : '开启自动加载'}</button>
       <button type="button" class="btn" id="resync-allowlist-settings">重新加载 allowlist</button>
     </div>
+    <div class="subtle" style="margin-top:6px">约定：export const allowlist = { JSON 对象 }；对象须双引号键/值，勿含 TS 类型语法。</div>
     <div class="allowlist-catalog-head">
       <div>字段清单（${ps.allowlistFieldCount || 0}）</div>
       <div class="subtle">${ps.allowlistBoName ? esc(ps.allowlistBoName) : '—'}${ps.allowlistVersion ? ` · v${esc(ps.allowlistVersion)}` : ''}</div>
@@ -2939,6 +3110,24 @@ function bindAppEvents() {
     bindAppEvents();
   });
 
+  document.getElementById('import-allowlist-ts')?.addEventListener('click', () => {
+    document.getElementById('import-allowlist-ts-input')?.click();
+  });
+  document.getElementById('import-allowlist-ts-input')?.addEventListener('change', async (event) => {
+    const file = event.target?.files?.[0];
+    event.target.value = '';
+    const result = await importAllowlistTsFile(file);
+    if (!result.ok) {
+      ui.settingsMessage = result.error || '导入失败';
+      showToast(ui.settingsMessage);
+    } else {
+      await readPageSettings({ includeAllowlistFields: true });
+      lastRefreshFingerprint = '';
+    }
+    renderApp();
+    bindAppEvents();
+  });
+
   document.getElementById('toggle-auto-allowlist')?.addEventListener('click', async () => {
     const enabled = ui.pageSettings?.stateScopeAutoAllowlist === false;
     await setAutoAllowlistOnPage(enabled);
@@ -3034,6 +3223,20 @@ async function refresh({ force = false } = {}) {
     if (ui.pageSettings?.scenarioTagMismatch) {
       await evalInPage('window.__StateScope__?.reconcileScenarioTag?.()');
       await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+    }
+
+    // 无 active tag 时 Epoch 不进场景累计 → Checklist 永久未开始；补绑 catalog 首项
+    if (
+      ui.pageSettings?.stateScopeInstalled &&
+      !ui.pageSettings?.scenarioTag &&
+      (ui.scenarioCatalog?.scenarios?.length || appState?.scenarioCatalogPack?.scenarios?.length)
+    ) {
+      await evalInPage(`window.__StateScope__?.ensureActiveScenarioTag?.()`);
+      await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+      if (ui.pageSettings?.scenarioTag) {
+        ui.scenarioTag = ui.pageSettings.scenarioTag;
+        ui.selectedScenarioTag = ui.selectedScenarioTag || ui.pageSettings.scenarioTag;
+      }
     }
 
     // 轻量摘要够判断是否有新轮次；全量只在确实需要时拉（含节流）

@@ -47,6 +47,8 @@ export function emptyScenarioReport(catalogPack) {
   return {
     boName: normalized?.boName || null,
     catalogVersion: normalized?.version || null,
+    catalogEpoch: normalized?.catalogEpoch || null,
+    catalogSource: normalized?.source || null,
     catalogTitle: normalized?.title || null,
     allowlistVersion: normalized?.allowlistVersion || null,
     hasNewChainObserved: false,
@@ -193,7 +195,15 @@ export function accumulateScenarioReport(report, epoch) {
     return report;
   }
 
-  const tag = typeof epoch.scenarioTag === 'string' ? epoch.scenarioTag.trim() : epoch.scenarioTag;
+  const rawTag = typeof epoch.scenarioTag === 'string' ? epoch.scenarioTag.trim() : epoch.scenarioTag;
+  let tag = rawTag;
+  if (tag && !report.scenarios[tag]) {
+    const lower = String(tag).toLowerCase();
+    const matchedKey = Object.keys(report.scenarios || {}).find((key) => key.toLowerCase() === lower);
+    if (matchedKey) {
+      tag = matchedKey;
+    }
+  }
   if (!tag || !report.scenarios[tag]) {
     if (epoch.hasNewChain) {
       report.hasNewChainObserved = true;

@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
-    "test": "node --test src/injector/lowcode-sample.test.js"
+    "test": "node --test src/injector/lowcode-sample.test.js src/injector/discover-allowlist-modules.test.js src/shared/parse-allowlist-ts.test.js src/injector/scenario-catalog-epoch.test.js"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

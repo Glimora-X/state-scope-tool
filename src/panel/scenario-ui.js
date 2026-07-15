@@ -203,8 +203,8 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
       record.markedComplete ?
         '取消签字'
       : record.signOffMode === 'manual' ?
-        'Mark Complete（manual 可直接签）'
-      : 'Mark Complete（PASS 可签）';
+        '签字确认（可不观测直接签）'
+      : '签字确认（需先 PASS）';
     const fieldRows = record.fields?.length ?
         record.fields
       : (record.watchFields || []).map((watch) => ({
@@ -251,6 +251,9 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         <button type="button" class="btn" id="use-as-active-scenario">设为当前测试场景</button>
         <button type="button" class="btn" id="force-sample-epoch" title="单据已在目标态但未触发业务动作时，手动采一帧写入观测轮次">采样当前状态</button>
       </div>
+      <div class="banner info" style="margin-top:8px">
+        低代码：仅切换场景不会出 Epoch。「新增空白」属初始态——打开空白单后点「采样当前状态」，或改任意字段触发 doDispatch。
+      </div>
       <div class="cutover-table-wrap">
         <table class="cutover-table">
           <thead><tr><th>字段</th><th>观测轮次</th><th>升级前后不一致</th><th>结果</th></tr></thead>
@@ -286,14 +289,14 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
     const boName = report?.boName || ctx.ui?.pageSettings?.pageMeta?.boName || '当前 BO';
     const ready = isCatalogReady(ctx, report);
     const catalogLine = ready ?
-        `${report.boName || '—'} · ${ctx.esc(report.catalogTitle || '场景包')} · v${ctx.esc(report.catalogVersion)} · ${Object.keys(report.scenarios || {}).length} 项`
-      : `${ctx.esc(boName)} · 未加载场景包 · 请上传领域 SSOT`;
+        `${report.boName || '—'} · ${ctx.esc(report.catalogTitle || '场景包')} · v${ctx.esc(report.catalogVersion)} · epoch ${ctx.esc(report.catalogEpoch || '—')} · ${ctx.esc(report.catalogSource || '—')} · ${Object.keys(report.scenarios || {}).length} 项`
+      : `${ctx.esc(boName)} · 未加载场景包 · 等待领域自注册或上传 SSOT`;
     const catalogBanner =
       ready ?
         ''
       : `<div class="banner warn">
-        <strong>必须上传领域场景 SSOT</strong>，工具不会为低代码 BO 内置副本（避免领域改文件后工具不同步）。
-        <br/>请导入业务仓 <code>*.scenarios.v1.json</code>（如 <code>outsourceIssue.scenarios.v1.json</code> / <code>outsourceStockin.scenarios.v1.json</code>）。
+        <strong>需要场景清单</strong>：优先靠领域 <code>publishStateScopeForDebug</code> 自注册；也可上传业务仓 <code>*.scenarios.v1.json</code>。
+        有自注册时会覆盖本地旧上传（同源 <code>catalogEpoch</code> 亦切换为 <code>window-registry</code>）。
         仅销货单 GoodsIssue 仍可点「加载内置场景」。
       </div>`;
     const emptyHint =
@@ -349,6 +352,32 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         await writeScenarioToPage(ctx, tag);
         const label = findChecklistItem(ctx, tag)?.label || tag;
         ctx.showToast(`当前场景：${label}`);
+        const meta = findChecklistItem(ctx, tag);
+        const blankSetup =
+          /空白|打开单据|不录入/.test(`${meta?.checkpoint || ''} ${meta?.label || ''}`) &&
+          !/明细|选单|生单|保存|审核/.test(`${meta?.checkpoint || ''} ${meta?.label || ''}`);
+        // 空白初始态：仅选场景不会触发 doDispatch → 自动采一帧，否则时间线空白
+        if (blankSetup) {
+          const sample = await ctx.evalInPage(`(function () {
+            var ss = window.__StateScope__;
+            if (!ss) { try { ss = window.top && window.top.__StateScope__; } catch (e) {} }
+            if (!ss) return { ok: false, error: 'injector 未就绪' };
+            if (ss.resampleBootstrap) {
+              return ss.resampleBootstrap();
+            }
+            if (ss.forceLowcodeSample) {
+              return ss.forceLowcodeSample('scenario-blank-setup');
+            }
+            return { ok: false, error: '无采样 API' };
+          })()`);
+          const result = sample?.result || sample;
+          if (result?.ok) {
+            ctx.showToast('已触发空白初始态采样，约 0.5s 后看时间线');
+            await new Promise((resolve) => setTimeout(resolve, 700));
+          } else if (result?.error) {
+            ctx.showToast(result.error);
+          }
+        }
         await ctx.refresh?.({ force: true });
       });
     });
@@ -387,17 +416,38 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
 
     document.getElementById('mark-scenario-complete')?.addEventListener('click', async () => {
       const tag = getSelectedScenario(ctx);
+      if (!tag) {
+        ctx.showToast('请先选择左侧场景');
+        return;
+      }
       const record = getReport(ctx)?.scenarios?.[tag];
       const complete = !record?.markedComplete;
-      const response = await chrome.runtime.sendMessage({
+
+      // 签字前确保 SW 有 catalog（避免 Panel 已显示场景但后台报「未知场景」）
+      if (ctx.syncScenarioCatalog) {
+        await ctx.syncScenarioCatalog();
+      }
+
+      let response = await chrome.runtime.sendMessage({
         type: 'SS_MARK_SCENARIO',
         tabId: ctx.tabId,
         scenarioTag: tag,
         complete
       });
+
+      if (!response?.ok && response?.needsUpload && ctx.ui?.scenarioCatalog) {
+        await ctx.syncScenarioCatalog({ catalog: ctx.ui.scenarioCatalog });
+        response = await chrome.runtime.sendMessage({
+          type: 'SS_MARK_SCENARIO',
+          tabId: ctx.tabId,
+          scenarioTag: tag,
+          complete
+        });
+      }
+
       if (response?.ok) {
         ctx.applyScenarioMarkLocally?.(tag, response.record, response.summary);
-        ctx.showToast(complete ? '场景已 Mark Complete' : '已取消签字');
+        ctx.showToast(complete ? '已签字确认本场景通过' : '已取消签字');
         await ctx.refresh({ force: true });
       } else {
         ctx.showToast(response?.error || '操作失败');

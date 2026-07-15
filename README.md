@@ -65,7 +65,25 @@ Panel 与 Console 共用同一套 epoch 数据（injector → content bridge →
   ❌ goodsItems.xxx.warehouseId.disabled | old=true new=false | logic-mismatch
 ```
 
-3. allowlist 配置（**可选**；默认自动加载 `allowlists/*.json`，可关闭或清除）：
+3. allowlist 配置（**自动优先**）：
+
+**领域自注册（推荐，MF 远端单据）：** `bizDebug=true` 时，领域 Controller 通过 **唯一入口** `publishStateScopeForDebug({ allowlist, scenarios })` 一次挂到：
+
+- `window.__STATE_SCOPE_ALLOWLISTS__[boName]`
+- `window.__STATE_SCOPE_SCENARIOS__[boName]`
+
+并派发 `statescope:register`。插件订阅后自动绑定 allowlist + 场景包（`source=window-registry`，以 `catalogEpoch` 对账）。
+
+```javascript
+// 验绑定
+__StateScope__.listLoadedAllowlists()
+Object.keys(window.__STATE_SCOPE_ALLOWLISTS__ || {})
+Object.keys(window.__STATE_SCOPE_SCENARIOS__ || {})
+__StateScope__.getScenarioCatalogSummary()
+// → catalogEpoch / source / scenarioCount
+```
+
+手工兜底：
 
 ```javascript
 // 取消当前单据 allowlist → Diff 恢复全量
@@ -83,6 +101,8 @@ __StateScope__.setAutoAllowlistEnabled(true)
 // 手动加载完整 JSON
 __StateScope__.applyAllowlistConfig({ boName: 'GoodsIssue', version: '...', fields: [...] })
 ```
+
+优先级：`window-registry` → `dom` → `webpack-source` → 手工导入。
 
 ## 排障
 
@@ -149,20 +169,23 @@ location.reload();
 | `localStorage.stateScopeVerbose` | `'true'` | 打印完整 oldSnap/newSnap（默认仅摘要） |
 | `localStorage.stateScopeDebug` | `'true'` | 每轮 epoch 写入 `__StateScope__.getLastEpoch()`，并提示 diagnose API |
 | `localStorage.stateScopeAutoAllowlist` | `'true'`（默认）/ `'false'` | 关闭后不再自动加载 allowlists/*.json |
-| `localStorage.stateScopeScenario` | 如 `edit` / `view` | 当前测试场景；未设置时不自动采集 Issue |
+| `localStorage.stateScopeScenario:{boName}` | 如 `os-s01` | 当前测试场景（按 BO）；旧扁平 `stateScopeScenario` 会迁移一次 |
 
 ### 场景回归（P1.5）
 
-1. **场景清单来源**
-   - **GoodsIssue（传统试点）**：扩展内置 `scenarios/GoodsIssue.L3.v1.json`
-   - **其它 BO（含低代码 OutsourceIssue）**：**必须上传**业务仓领域 SSOT（如 `outsourceIssue.scenarios.v1.json`），工具**不内置副本**
-2. Panel → **场景回归** → **上传领域 SSOT**；支持领域 schema（`id/setup/actions/assertFields`）
-3. 顶部选择 **当前测试场景**，Epoch 计入该场景
-4. 场景 **PASS**：shadow/new 轨已观测 + watch 字段无 logic-mismatch
-5. PASS 后可 **Mark Complete**；导出场景报告 JSON/CSV
+1. **场景清单权威**
+   - **① 领域自注册**（推荐）：`publishStateScopeForDebug({ allowlist, scenarios })` → `window.__STATE_SCOPE_SCENARIOS__[boName]`
+   - **② 页面 localStorage**（兜底）：手工上传后落盘；有 ① 时无条件被覆盖
+   - **GoodsIssue**：可回退扩展内置 L3
+2. 身份用 **`catalogEpoch`**（规则体级 hash：含 assertFields/watchFields 等；**不含** note/title）。跨 epoch **不继承** PASS/BLOCK。
+3. Panel / SW 对账键：`catalogEpoch|source`（source=`window-registry` 优先于 `local-upload`）
+4. 顶部选择 **当前测试场景**；切 BO 用 `stateScopeScenario:{boName}` 隔离
+5. 若领域包开始规范化语义化 `version`：须重评 `computeCatalogEpoch` 的 hash 输入
 
 ```javascript
-__StateScope__.setScenarioTag('audit-edit')
+Object.keys(window.__STATE_SCOPE_SCENARIOS__ || {})
+__StateScope__.getScenarioCatalogSummary()
+__StateScope__.setScenarioTag('os-s01')
 ```
 
 ## 调试（Console 展开空白时）
