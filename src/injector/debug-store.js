@@ -38,6 +38,11 @@ export function getLastEpoch() {
   return lastEpoch;
 }
 
+export function clearEpochStore() {
+  lastEpoch = null;
+  epochHistory = [];
+}
+
 export function getEpochHistory() {
   return epochHistory;
 }

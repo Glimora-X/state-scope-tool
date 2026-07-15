@@ -492,6 +492,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return { ok: true, scenarioReport: state.scenarioReport };
     }
 
+    if (message.type === 'SS_CLEAR_CACHE') {
+      const state = getTabState(message.tabId);
+      const fresh = emptyTabState(state.scenarioCatalogPack);
+      fresh.runtime = state.runtime;
+      tabStore.set(message.tabId, fresh);
+      notifyPanelStateUpdated(message.tabId);
+      return { ok: true };
+    }
+
     if (message.type === 'SS_BOOTSTRAP_SCENARIO_CATALOG') {
       const state = getTabState(message.tabId);
       const result = ensureScenarioCatalog(state, message.boName, { force: !!message.force });

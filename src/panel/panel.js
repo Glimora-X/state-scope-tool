@@ -1,4 +1,10 @@
-const PANEL_VERSION = '0.8.32';
+const PANEL_VERSION = '0.8.35';
+
+const CONSOLE_FILTER_PRESETS = [
+  { id: 'action-copy-filter-all', label: 'StateScope', filter: 'StateScope' },
+  { id: 'action-copy-filter-epoch', label: 'Epoch', filter: 'StateScope Epoch' },
+  { id: 'action-copy-filter-scope', label: 'scope', filter: 'scope:' }
+];
 
 const ZH = window.StateScopeZh?.ZH || { epoch: '观测轮次', epochTimeline: '观测时间线' };
 const severityZh = window.StateScopeZh?.severityZh || ((s) => s || '—');
@@ -92,8 +98,12 @@ let lastScenarioFromEpochsKey = '';
 let refreshTimerId = null;
 let runtimeMessageFailures = 0;
 const MAX_RUNTIME_MESSAGE_FAILURES = 3;
-const PANEL_REFRESH_MS = 2500;
-const PANEL_REFRESH_HIDDEN_MS = 5000;
+/** 推送为主；定时仅作兜底心跳，不再 2.5s 狂拉 */
+const PANEL_REFRESH_MS = 15000;
+const PANEL_REFRESH_HIDDEN_MS = 30000;
+/** 用户划选文本时推迟整页重绘 */
+let deferredPanelRedraw = false;
+let pendingRefreshReason = 'timer';
 
 async function safeRuntimeMessage(message) {
   if (runtimeMessageFailures >= MAX_RUNTIME_MESSAGE_FAILURES) {
@@ -922,6 +932,36 @@ function formatAllowlistSourceLabel(source, sourceHint) {
   return ` · 来源 ${source}`;
 }
 
+function getAllowlistHeaderSummary() {
+  const ps = ui.pageSettings || {};
+  const binding = ui.allowlistBinding || {};
+  const boName = binding.boName || ps.allowlistBoName || '';
+  const version = binding.version || ps.allowlistVersion || '';
+  const fieldCount = binding.fieldCount ?? ps.allowlistFieldCount ?? 0;
+  const active = ps.allowlistActive || binding.active;
+  const source = binding.source || ps.allowlistSource || '';
+  const sourceHint = binding.sourceHint || ps.allowlistSourceHint || '';
+  if (active && boName) {
+    return {
+      active: true,
+      text: `allowlist ${boName} v${version || '—'} · ${fieldCount} 字段${formatAllowlistSourceLabel(source, sourceHint)}`,
+      short: `${boName} · ${fieldCount} 字段`
+    };
+  }
+  if (ps.loadedAllowlistKeys?.length) {
+    return {
+      active: false,
+      text: `allowlist 已加载 [${ps.loadedAllowlistKeys.join(', ')}]，当前 BO 未匹配`,
+      short: '未匹配当前 BO'
+    };
+  }
+  return {
+    active: false,
+    text: ps.stateScopeInstalled ? 'allowlist 未绑定（全量 Diff）' : 'allowlist 待 injector 挂载',
+    short: '未绑定'
+  };
+}
+
 function syncAllowlistUiFromPageSettings(ps, boName) {
   if (!ps?.allowlistActive || !ps.allowlistBoName) {
     return null;
@@ -967,8 +1007,8 @@ async function syncAllowlistViaPageInjector(boName) {
       var expectedBo = ${JSON.stringify(boName || '')};
       var diag = ss.diagnoseAllowlistScan ? ss.diagnoseAllowlistScan(expectedBo || undefined) : null;
       var hint = expectedBo
-        ? ('未从页面 webpack 找到与 ' + expectedBo + ' 匹配的 *.allowlist.ts，请到设置页导入领域白名单')
-        : '未从页面 webpack 找到 *.allowlist.ts，请到设置页导入领域白名单';
+        ? ('未从页面 webpack 找到与 ' + expectedBo + ' 匹配的 *.allowlist.ts，请到概览页导入领域白名单')
+        : '未从页面 webpack 找到 *.allowlist.ts，请到概览页导入领域白名单';
       if (diag && !diag.requireCount) {
         hint += '（未捕获 __webpack_require__；Sources 的 webpack:// 仅是 source map）';
       }
@@ -1317,7 +1357,7 @@ async function syncAllowlistToPage({ force = false } = {}) {
     return { ok: false, reason: 'auto-disabled' };
   }
 
-  await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+  await readPageSettings({ includeAllowlistFields: needsAllowlistCatalogFields() });
   const boName = await resolveBoNameForAllowlist();
   // 切单后 pageMeta.boName 变了：强制按当前 BO 重绑 UI（避免 lastSynced 残留上一单）
   if (
@@ -1346,12 +1386,12 @@ async function syncAllowlistToPage({ force = false } = {}) {
     return injected;
   }
 
-  // 扩展不再打包 allowlists/*.json；未命中 webpack → 引导设置页导入
+  // 扩展不再打包 allowlists/*.json；未命中 webpack → 引导概览页导入
   const tip =
     injected?.error ||
     (boName ?
-      `未从页面 webpack 找到与 ${boName} 匹配的 *.allowlist.ts，请到设置页导入领域白名单`
-    : '未从页面 webpack 找到 *.allowlist.ts，请到设置页导入领域白名单');
+      `未从页面 webpack 找到与 ${boName} 匹配的 *.allowlist.ts，请到概览页导入领域白名单`
+    : '未从页面 webpack 找到 *.allowlist.ts，请到概览页导入领域白名单');
   if (force) {
     ui.settingsMessage = tip;
   }
@@ -1806,7 +1846,7 @@ async function setAutoAllowlistOnPage(enabled) {
 function renderCutoverTable(report) {
   const fields = report?.fields || [];
   if (!fields.length) {
-    return `<div class="empty">尚无字段清单累计。请确认领域 *.allowlist.ts 已从页面 webpack 加载（或在设置页导入），并操作单据触发观测轮次。</div>`;
+    return `<div class="empty">尚无字段清单累计。请确认领域 *.allowlist.ts 已从页面 webpack 加载（或在概览页导入），并操作单据触发观测轮次。</div>`;
   }
 
   return `<div class="cutover-table-wrap">
@@ -1946,13 +1986,22 @@ function renderChrome() {
       profile === 'lowcode' ?
         diag.mdfBizApplication || diag.mdfDoDispatch || diag.lowcodeViewModel
       : diag.stateManager;
+    const allow = getAllowlistHeaderSummary();
     headerMeta.innerHTML = `
-      <span>单据 <strong>${esc(meta.boName || '(unknown)')}</strong></span>
-      <span class="sep">|</span>
-      <span>Profile <strong title="${profileTitle}">${esc(profile)}</strong>${conf}</span>
-      <span class="sep">|</span>
-      <span>old <span class="${oldOk ? 'chain-ok' : 'chain-off'}">${oldOk ? '✓' : '✗'}</span></span>
-      <span>${profile === 'lowcode' ? 'shadow' : 'new'} <span class="${newOk ? 'chain-ok' : 'chain-off'}">${newOk ? '✓' : '✗'}</span></span>
+      <div class="header-meta-stack">
+        <div class="header-meta-row">
+          <span>单据 <strong>${esc(meta.boName || '(unknown)')}</strong></span>
+          <span class="sep">|</span>
+          <span>Profile <strong title="${profileTitle}">${esc(profile)}</strong>${conf}</span>
+          <span class="sep">|</span>
+          <span>old <span class="${oldOk ? 'chain-ok' : 'chain-off'}">${oldOk ? '✓' : '✗'}</span></span>
+          <span>${profile === 'lowcode' ? 'shadow' : 'new'} <span class="${newOk ? 'chain-ok' : 'chain-off'}">${newOk ? '✓' : '✗'}</span></span>
+        </div>
+        <div class="header-meta-row header-allowlist ${allow.active ? 'is-active' : 'is-idle'}" title="${esc(allow.text)}">
+          <span class="header-allowlist-label">Allowlist</span>
+          <span class="header-allowlist-text">${esc(allow.text)}</span>
+        </div>
+      </div>
     `;
   }
 
@@ -2373,11 +2422,32 @@ function renderActivationBanner(activation) {
   </div>`;
 }
 
-function renderQuickActions() {
-  return `<div class="quick-actions">
-    <button type="button" class="btn" id="action-copy-diagnose">复制 diagnoseLastEpoch</button>
-    <button type="button" class="btn" id="action-copy-filter">复制 Console 过滤词</button>
-    <button type="button" class="btn" id="action-export-snapshot">导出当前观测轮次 JSON</button>
+function isAllowlistBindingNoise(message) {
+  if (!message) {
+    return false;
+  }
+  return (
+    /allowlist (已绑定|已导入|已写入|已清除|已取消)/.test(message) ||
+    /Diff 恢复全量/.test(message) ||
+    /自动加载 allowlist/.test(message)
+  );
+}
+
+function renderOverviewToolbar() {
+  const filters = CONSOLE_FILTER_PRESETS.map(
+    (item) =>
+      `<button type="button" class="btn-mini" id="${item.id}" title="复制 Console 过滤词：${esc(item.filter)}">${esc(item.label)}</button>`
+  ).join('');
+
+  return `<div class="overview-toolbar">
+    <span class="overview-toolbar-label">Console</span>
+    ${filters}
+    <span class="overview-toolbar-sep"></span>
+    <button type="button" class="btn-mini" id="action-copy-diagnose" title="复制 diagnoseLastEpoch">diagnoseLastEpoch</button>
+    <button type="button" class="btn-mini" id="action-export-snapshot" title="导出当前观测轮次 JSON">导出观测 JSON</button>
+    <button type="button" class="btn-mini" data-goto-tab="timeline">观测时间线</button>
+    <button type="button" class="btn-mini" data-goto-tab="diff">升级对比</button>
+    <button type="button" class="btn-mini btn-warn" id="action-clear-cache" title="清除页面与 Background 观测缓存">清除缓存</button>
   </div>`;
 }
 
@@ -2461,45 +2531,6 @@ function renderEpochDetailColumn(epoch, { showVerdict = false } = {}) {
   </div>`;
 }
 
-function renderOverview() {
-  const activation = getActivationState();
-  const epoch = getSelectedEpoch();
-  const epochs = appState?.epochs || [];
-
-  if (activation.level !== 'on' && !epoch) {
-    return `${renderActivationBanner(activation)}${renderQuickActions()}`;
-  }
-
-  const impact = getEpochImpact(epoch);
-
-  return `${renderOverviewHero(epoch)}
-  <div class="overview-grid">
-    <div class="card">
-      <div class="card-head">当前状态概览</div>
-      <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">${ZH.epochShort || '轮次'}</div><div class="kpi-value">#${epoch?.id || '—'}</div></div>
-        <div class="kpi"><div class="kpi-label">变更集</div><div class="kpi-value">${impact.changed}</div></div>
-        <div class="kpi"><div class="kpi-label">快照</div><div class="kpi-value">${impact.final}</div></div>
-      </div>
-      ${epoch ? renderDiffBadges(epoch.diffSummary) : ''}
-      <div class="card-head">本次观测摘要</div>
-      <div class="summary-text">${esc(renderKeySummary(epoch))}</div>
-      ${renderQuickActions()}
-    </div>
-    <div class="card">
-      <div class="card-head">最近${ZH.epochTimeline || '观测时间线'}</div>
-      ${renderTimelineList(epochs)}
-    </div>
-    <div class="card">${renderEpochDetailColumn(epoch, { showVerdict: false })}</div>
-  </div>
-  <div class="banner info">${esc(getAllowlistBannerText())}</div>
-  <div class="hint-cards">
-    <div class="hint-card"><strong>表头展示</strong>path 平铺，适合核对表头字段终态。</div>
-    <div class="hint-card"><strong>明细展示</strong>Grid 视图，默认仅变更列，可展开全部列。</div>
-    <div class="hint-card"><strong>对比原则</strong>优先关注「升级前后不一致」。「影子未写入」= 框架已采到升级前、问题在 shadowStore 存储；「未升级」= 影子通了但某字段仍缺。</div>
-  </div>`;
-}
-
 function renderTimelinePage() {
   const epochs = appState?.epochs || [];
   const epoch = getSelectedEpoch();
@@ -2556,13 +2587,14 @@ function buildRefreshFingerprint() {
     (sum, item) => sum + (item?.readyFields || 0),
     0
   );
+  // 内容身份指纹：禁止纳入 updatedAt 等时间戳，否则每轮 loadState 都会整页重绘
   return [
     ui.tab,
     ui.selectedEpochId ?? '',
     ui.scenarioTag ?? '',
     ui.selectedScenarioTag ?? '',
     appState?.epochs?.length ?? 0,
-    appState?.updatedAt ?? 0,
+    appState?.epochs?.[0]?.id ?? '',
     activation.level,
     ui.pageSettings?.bizDebug,
     ui.pageSettings?.stateScopeInstalled,
@@ -2573,26 +2605,113 @@ function buildRefreshFingerprint() {
     ui.allowlistBinding?.version,
     ui.pageSettings?.pageSyncEpochCount,
     ui.pageSettings?.pageSyncSummary?.latestEpochId ?? '',
-    ui.pageSettings?.pageSyncSummary?.latestStartedAt ?? '',
     epoch?.id ?? '',
-    epoch?.startedAt ?? '',
     epoch?.scenarioTag ?? '',
     epoch?.diffSummary?.logicMismatch ?? '',
-    report?.updatedAt ?? 0,
+    report?.summary?.blockedFields ?? '',
     (appState?.issues || []).length,
     scenarioReport?.catalogVersion ?? '',
+    scenarioReport?.catalogEpoch ?? '',
     Object.keys(scenarioReport?.scenarios || {}).length,
-    scenarioReport?.updatedAt ?? 0,
     scenarioReport?.summary?.markedComplete ?? 0,
     scenarioReport?.summary?.pass ?? 0,
     scenarioReport?.summary?.inProgress ?? 0,
     scenarioReport?.summary?.notStarted ?? 0,
+    scenarioReport?.summary?.block ?? 0,
     scenarioEpochSum,
     scenarioReadySum,
     ui.scenarioCatalog?.version ?? '',
-    ui.tab === 'scenarios' ? 'scenarios' : '',
+    ui.scenarioCatalog?.catalogEpoch ?? '',
     JSON.stringify(ui.expanded)
   ].join('|');
+}
+
+function hasLiveTextSelectionInPanel() {
+  try {
+    const sel = window.getSelection?.();
+    if (!sel || sel.isCollapsed) {
+      return false;
+    }
+    const text = String(sel.toString() || '');
+    if (!text.trim()) {
+      return false;
+    }
+    const root = document.getElementById('app');
+    if (!root) {
+      return false;
+    }
+    return root.contains(sel.anchorNode) || root.contains(sel.focusNode);
+  } catch {
+    return false;
+  }
+}
+
+function capturePanelScrollState() {
+  const main = document.querySelector('.main');
+  if (!main) {
+    return null;
+  }
+  const nested = [];
+  main.querySelectorAll('*').forEach((el) => {
+    if (el.scrollHeight > el.clientHeight + 8) {
+      const style = window.getComputedStyle(el);
+      if (/(auto|scroll)/.test(style.overflowY) || /(auto|scroll)/.test(style.overflow)) {
+        nested.push({
+          key: `${el.className}|${el.id}|${el.tagName}`,
+          top: el.scrollTop,
+          left: el.scrollLeft
+        });
+      }
+    }
+  });
+  return { mainTop: main.scrollTop, mainLeft: main.scrollLeft, nested };
+}
+
+function restorePanelScrollState(state) {
+  if (!state) {
+    return;
+  }
+  const main = document.querySelector('.main');
+  if (!main) {
+    return;
+  }
+  main.scrollTop = state.mainTop || 0;
+  main.scrollLeft = state.mainLeft || 0;
+  if (!state.nested?.length) {
+    return;
+  }
+  const used = new Set();
+  main.querySelectorAll('*').forEach((el) => {
+    if (el.scrollHeight <= el.clientHeight + 8) {
+      return;
+    }
+    const style = window.getComputedStyle(el);
+    if (!/(auto|scroll)/.test(style.overflowY) && !/(auto|scroll)/.test(style.overflow)) {
+      return;
+    }
+    const key = `${el.className}|${el.id}|${el.tagName}`;
+    const hit = state.nested.find((item, index) => item.key === key && !used.has(index));
+    if (!hit) {
+      return;
+    }
+    const idx = state.nested.indexOf(hit);
+    used.add(idx);
+    el.scrollTop = hit.top || 0;
+    el.scrollLeft = hit.left || 0;
+  });
+}
+
+/** 整页重绘（保留滚动；划选中则推迟） */
+function renderMainPanelPreservingView({ allowDuringSelection = false } = {}) {
+  if (!allowDuringSelection && hasLiveTextSelectionInPanel()) {
+    deferredPanelRedraw = true;
+    return false;
+  }
+  const scroll = capturePanelScrollState();
+  renderMainPanel();
+  restorePanelScrollState(scroll);
+  deferredPanelRedraw = false;
+  return true;
 }
 
 function renderMainPanel() {
@@ -2627,7 +2746,34 @@ function renderApp() {
   updateCutoverNavBadge();
   updateIssuesNavBadge();
   window.StateScopeScenarioUI?.updateNavBadge(getPanelCtx());
-  renderMainPanel();
+  renderMainPanelPreservingView({ allowDuringSelection: true });
+}
+
+async function clearStateScopeCache() {
+  if (
+    !window.confirm('清除当前 Tab 的 StateScope 观测缓存？\n不会删除 Jira/Issue、allowlist 绑定与场景包。')
+  ) {
+    return;
+  }
+
+  await safeRuntimeMessage({ type: 'SS_CLEAR_CACHE', tabId });
+  await evalInPage(`(function () {
+    var ss = window.__StateScope__;
+    if (ss && ss.clearPanelCache) return ss.clearPanelCache();
+    return { ok: false, error: 'injector 未就绪' };
+  })()`);
+
+  ui.selectedEpochId = null;
+  ui.epochFollowLatest = true;
+  if (appState) {
+    appState.epochs = [];
+    appState.selectedEpochId = null;
+    appState.cutoverReport = null;
+    appState.scenarioReport = null;
+  }
+
+  await refresh({ force: true, reason: 'user' });
+  showToast('StateScope 缓存已清除');
 }
 
 async function exportDiagnosticJson() {
@@ -2747,12 +2893,50 @@ function renderFlatRows(rows, emptyText) {
     .join('');
 }
 
-function getAllowlistBannerText() {
-  const epoch = getSelectedEpoch();
-  if (epoch?.allowlistMeta?.fieldCount) {
-    return `对比按字段清单过滤（${epoch.allowlistMeta.fieldCount} 字段）；可在「设置」取消恢复全量。`;
+function getOverviewNoticeBanner() {
+  const msg = ui.settingsMessage;
+  if (!msg || isAllowlistBindingNoise(msg)) {
+    return '';
   }
-  return '当前无字段清单，对比全部捕获字段；切流报告需在设置中加载字段清单。';
+  return `<div class="banner ${msg.includes('失败') || msg.includes('未找到') ? 'warn' : 'info'}">${esc(msg)}</div>`;
+}
+
+function renderOverviewStatusCard(epoch, activation) {
+  const impact = getEpochImpact(epoch);
+  const epochs = appState?.epochs || [];
+  const pageEpochCount = getPageEpochCount();
+  return `<div class="card overview-status">
+    <div class="card-head">运行快照</div>
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">激活</div><div class="kpi-value kpi-sm">${esc(activation.label)}</div></div>
+      <div class="kpi"><div class="kpi-label">${ZH.epochShort || '轮次'}</div><div class="kpi-value">${epochs.length || pageEpochCount || 0}</div></div>
+      <div class="kpi"><div class="kpi-label">最新</div><div class="kpi-value">${epoch ? `#${epoch.id}` : '—'}</div></div>
+      <div class="kpi"><div class="kpi-label">变更</div><div class="kpi-value">${impact.changed}</div></div>
+    </div>
+    ${epoch ? renderDiffBadges(epoch.diffSummary) : '<div class="subtle">尚无观测轮次；时间线与详情见侧栏「观测时间线」。</div>'}
+    <div class="summary-text">${esc(renderKeySummary(epoch))}</div>
+  </div>`;
+}
+
+function renderOverview() {
+  const activation = getActivationState();
+  const epoch = getSelectedEpoch();
+  const ps = ui.pageSettings || {};
+
+  return `${renderActivationBanner(activation)}
+  ${renderOverviewToolbar()}
+  ${getOverviewNoticeBanner()}
+  <div class="overview-cockpit">
+    ${renderOverviewStatusCard(epoch, activation)}
+    ${renderDevToolsSettingsCard(ps)}
+    ${renderProfileSettingsCard(ps)}
+    ${renderAllowlistSettingsCard(ps)}
+  </div>
+  <div class="hint-cards">
+    <div class="hint-card"><strong>时间线</strong>侧栏「观测时间线」查看最近轮次与字段终态详情。</div>
+    <div class="hint-card"><strong>对比</strong>优先关注「升级前后不一致」。「影子未写入」= 框架已采到升级前、问题在 shadowStore。</div>
+    <div class="hint-card"><strong>Allowlist</strong>绑定状态在页眉；导入/清除在本页 Allowlist 区。</div>
+  </div>`;
 }
 
 function renderAllowlistCatalog(ps) {
@@ -2793,8 +2977,7 @@ function renderAllowlistCatalog(ps) {
   </div>`;
 }
 
-function renderSettings() {
-  const ps = ui.pageSettings || {};
+function renderDevToolsSettingsCard(ps) {
   const rows = DEBUG_KEYS.map(({ key, label, desc }) => {
     const on = !!ps[key];
     return `<div class="settings-row">
@@ -2803,27 +2986,9 @@ function renderSettings() {
     </div>`;
   }).join('');
 
-  const allowlistStatus = ps.allowlistActive ?
-      `已绑定 · ${ps.allowlistFieldCount || 0} 字段${ps.allowlistVersion ? ` · v${ps.allowlistVersion}` : ''}${ps.allowlistBoName ? ` · ${ps.allowlistBoName}` : ''}${ps.allowlistSource ? ` · ${ps.allowlistSource}` : ''}${ps.allowlistSourceHint ? ` · ${ps.allowlistSourceHint}` : ''}`
-    : ps.loadedAllowlistKeys?.length ?
-        `injector 已加载 [${ps.loadedAllowlistKeys.join(', ')}]，当前 bo 未匹配`
-      : ps.stateScopeInstalled ?
-          `未从页面 webpack 找到 *.allowlist.ts，请导入领域白名单`
-        : 'injector 未挂载（bizDebug=true 后刷新）';
-  const autoAllowlistOn = ps.stateScopeAutoAllowlist !== false;
-  const profileMode = ps.stateScopeProfile || 'auto';
-  const profileDet = ps.profileDetection || {};
-  const profileRows = PROFILE_OPTIONS.map(
-    (opt) => `<option value="${esc(opt.value)}" ${profileMode === opt.value ? 'selected' : ''}>${esc(opt.label)}</option>`
-  ).join('');
-
-  const msg = ui.settingsMessage ?
-      `<div class="banner ${ui.settingsMessage.includes('失败') || ui.settingsMessage.includes('未找到') ? 'warn' : 'info'}">${esc(ui.settingsMessage)}</div>`
-    : '';
-
-  return `${msg}<div class="card">
-    <h3>DevTools 设置</h3>
-    <div class="subtle">Panel v${PANEL_VERSION}${ps.stateScopeVersion ? ` · 页面 injector v${esc(ps.stateScopeVersion)}${ps.stateScopeHooksReady ? '' : '（hook 待就绪）'}` : ''}</div>
+  return `<div class="card overview-panel">
+    <div class="card-head">DevTools</div>
+    <div class="subtle overview-panel-meta">Panel v${PANEL_VERSION}${ps.stateScopeVersion ? ` · injector v${esc(ps.stateScopeVersion)}${ps.stateScopeHooksReady ? '' : '（hook 待就绪）'}` : ''}</div>
     <div class="settings-actions">
       <button type="button" class="btn primary" id="enable-all-debug">一键开启 bizDebug</button>
       <button type="button" class="btn primary" id="enable-and-reload">一键开启并刷新</button>
@@ -2831,9 +2996,18 @@ function renderSettings() {
       <button type="button" class="btn" id="rediscover-hooks">重新挂 Hook</button>
     </div>
     ${rows}
-  </div>
-  <div class="card">
-    <h3>验证 Profile</h3>
+  </div>`;
+}
+
+function renderProfileSettingsCard(ps) {
+  const profileMode = ps.stateScopeProfile || 'auto';
+  const profileDet = ps.profileDetection || {};
+  const profileRows = PROFILE_OPTIONS.map(
+    (opt) => `<option value="${esc(opt.value)}" ${profileMode === opt.value ? 'selected' : ''}>${esc(opt.label)}</option>`
+  ).join('');
+
+  return `<div class="card overview-panel">
+    <div class="card-head">验证 Profile</div>
     <div class="settings-row">
       <div>
         <div>当前模式</div>
@@ -2851,9 +3025,21 @@ function renderSettings() {
     <div class="settings-actions">
       <button type="button" class="btn primary" id="apply-profile-mode">应用 Profile 并刷新</button>
     </div>
-  </div>
-  <div class="card">
-    <h3>Allowlist</h3>
+  </div>`;
+}
+
+function renderAllowlistSettingsCard(ps) {
+  const allowlistStatus = ps.allowlistActive ?
+      `已绑定 · ${ps.allowlistFieldCount || 0} 字段${ps.allowlistVersion ? ` · v${ps.allowlistVersion}` : ''}${ps.allowlistBoName ? ` · ${ps.allowlistBoName}` : ''}${ps.allowlistSource ? ` · ${ps.allowlistSource}` : ''}${ps.allowlistSourceHint ? ` · ${ps.allowlistSourceHint}` : ''}`
+    : ps.loadedAllowlistKeys?.length ?
+        `injector 已加载 [${ps.loadedAllowlistKeys.join(', ')}]，当前 bo 未匹配`
+      : ps.stateScopeInstalled ?
+          `未从页面 webpack 找到 *.allowlist.ts，请导入领域白名单`
+        : 'injector 未挂载（bizDebug=true 后刷新）';
+  const autoAllowlistOn = ps.stateScopeAutoAllowlist !== false;
+
+  return `<div class="card overview-panel overview-panel-wide">
+    <div class="card-head">Allowlist</div>
     <div class="settings-row">
       <div>
         <div>当前状态</div>
@@ -2881,8 +3067,23 @@ function renderSettings() {
       <div class="subtle">${ps.allowlistBoName ? esc(ps.allowlistBoName) : '—'}${ps.allowlistVersion ? ` · v${esc(ps.allowlistVersion)}` : ''}</div>
     </div>
     ${renderAllowlistCatalog(ps)}
+  </div>`;
+}
+
+function renderSettings() {
+  const msg = ui.settingsMessage && (ui.settingsMessage.includes('Jira') || ui.settingsMessage.includes('jira')) ?
+      `<div class="banner ${ui.settingsMessage.includes('失败') ? 'warn' : 'info'}">${esc(ui.settingsMessage)}</div>`
+    : '';
+  return `${msg}
+  <div class="card">
+    <div class="card-head">设置</div>
+    <div class="subtle">DevTools / Profile / Allowlist 已迁至「概览」。本页仅保留 Jira 同步配置。</div>
   </div>
-  ${window.StateScopeIssuesUI ? window.StateScopeIssuesUI.renderJiraSettings(getIssuesCtx()) : ''}`;
+  ${window.StateScopeIssuesUI ? window.StateScopeIssuesUI.renderJiraSettings(getIssuesCtx()) : '<div class="empty">Issues UI 未加载</div>'}`;
+}
+
+function needsAllowlistCatalogFields() {
+  return ui.tab === 'overview';
 }
 
 async function selectEpoch(epochId) {
@@ -2913,8 +3114,8 @@ function bindAppEvents() {
       }
       ui.tab = el.getAttribute('data-goto-tab');
       syncNavActive();
-      if (ui.tab === 'settings') {
-        await readPageSettings();
+      if (ui.tab === 'overview' || ui.tab === 'settings') {
+        await readPageSettings({ includeAllowlistFields: needsAllowlistCatalogFields() });
       }
       renderApp();
       bindAppEvents();
@@ -2959,8 +3160,14 @@ function bindAppEvents() {
   });
 
   document.getElementById('action-copy-diagnose')?.addEventListener('click', copyDiagnoseFromPage);
-  document.getElementById('action-copy-filter')?.addEventListener('click', () => copyText('StateScope'));
+  CONSOLE_FILTER_PRESETS.forEach((item) => {
+    document.getElementById(item.id)?.addEventListener('click', () => {
+      copyText(item.filter);
+      showToast(`已复制过滤词：${item.filter}`);
+    });
+  });
   document.getElementById('action-export-snapshot')?.addEventListener('click', exportDiagnosticJson);
+  document.getElementById('action-clear-cache')?.addEventListener('click', clearStateScopeCache);
   document.getElementById('copy-epoch-json')?.addEventListener('click', exportDiagnosticJson);
 
   const showPaths = document.getElementById('show-paths');
@@ -3165,7 +3372,7 @@ function bindTabs() {
     tab.addEventListener('click', async () => {
       ui.tab = tab.getAttribute('data-tab');
       syncNavActive();
-      await refresh({ force: true });
+      await refresh({ force: true, reason: 'user' });
     });
   });
 }
@@ -3210,19 +3417,26 @@ function shouldLoadFullPageSync(force) {
   return true;
 }
 
-async function refresh({ force = false } = {}) {
+async function refresh({ force = false, reason = 'timer' } = {}) {
+  // 历史调用只传 force:true：视为用户意图，允许在内容指纹未变时也重绘（切 Tab / 点场景）
+  if (force && reason === 'timer') {
+    reason = 'user';
+  }
   if (refreshInFlight) {
     pendingRefresh = true;
     pendingRefreshForce = pendingRefreshForce || force;
+    if (reason === 'push' || reason === 'user') {
+      pendingRefreshReason = reason;
+    }
     return;
   }
   refreshInFlight = true;
   try {
-    await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+    await readPageSettings({ includeAllowlistFields: needsAllowlistCatalogFields() });
 
     if (ui.pageSettings?.scenarioTagMismatch) {
       await evalInPage('window.__StateScope__?.reconcileScenarioTag?.()');
-      await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+      await readPageSettings({ includeAllowlistFields: needsAllowlistCatalogFields() });
     }
 
     // 无 active tag 时 Epoch 不进场景累计 → Checklist 永久未开始；补绑 catalog 首项
@@ -3232,7 +3446,7 @@ async function refresh({ force = false } = {}) {
       (ui.scenarioCatalog?.scenarios?.length || appState?.scenarioCatalogPack?.scenarios?.length)
     ) {
       await evalInPage(`window.__StateScope__?.ensureActiveScenarioTag?.()`);
-      await readPageSettings({ includeAllowlistFields: ui.tab === 'settings' });
+      await readPageSettings({ includeAllowlistFields: needsAllowlistCatalogFields() });
       if (ui.pageSettings?.scenarioTag) {
         ui.scenarioTag = ui.pageSettings.scenarioTag;
         ui.selectedScenarioTag = ui.selectedScenarioTag || ui.pageSettings.scenarioTag;
@@ -3240,7 +3454,9 @@ async function refresh({ force = false } = {}) {
     }
 
     // 轻量摘要够判断是否有新轮次；全量只在确实需要时拉（含节流）
-    if (shouldLoadFullPageSync(force) && ui.pageSettings?.stateScopeInstalled) {
+    // 定时心跳不强制拉全量 pageSync，优先靠 SW 推送
+    const wantFullSync = force || reason === 'push' || reason === 'user';
+    if (shouldLoadFullPageSync(wantFullSync) && ui.pageSettings?.stateScopeInstalled) {
       await readPageSyncFull();
     }
 
@@ -3270,25 +3486,39 @@ async function refresh({ force = false } = {}) {
     await syncAllowlistToPage();
     hydrateScenarioReportFromCatalog();
 
+    // 局部：页眉/角标可每轮更新，不动主区 DOM
     renderChrome();
     updateCutoverNavBadge();
     updateIssuesNavBadge();
     window.StateScopeScenarioUI?.updateNavBadge(getPanelCtx());
 
     const fp = buildRefreshFingerprint();
-    if (force || didPageSync || fp !== lastRefreshFingerprint) {
+    const contentChanged = fp !== lastRefreshFingerprint;
+    // 定时心跳：内容没变绝不重绘主区；推送/用户操作：内容变才重绘（不再因 force 盲目整页刷）
+    const shouldPaintMain =
+      contentChanged || deferredPanelRedraw || (force && reason === 'user');
+
+    if (shouldPaintMain) {
+      const painted = renderMainPanelPreservingView({
+        allowDuringSelection: reason === 'user'
+      });
+      if (painted) {
+        lastRefreshFingerprint = fp;
+        bindAppEvents();
+      }
+    } else {
       lastRefreshFingerprint = fp;
-      renderMainPanel();
-      bindAppEvents();
     }
   } finally {
     refreshInFlight = false;
     if (pendingRefresh) {
       const nextForce = pendingRefreshForce;
+      const nextReason = pendingRefreshReason || 'timer';
       pendingRefresh = false;
       pendingRefreshForce = false;
+      pendingRefreshReason = 'timer';
       setTimeout(() => {
-        refresh({ force: nextForce });
+        refresh({ force: nextForce, reason: nextReason });
       }, 120);
     }
   }
@@ -3324,7 +3554,8 @@ function scheduleRefreshFromStateUpdated() {
   }
   stateUpdatedRefreshTimer = setTimeout(() => {
     stateUpdatedRefreshTimer = null;
-    refresh({ force: true });
+    // 推送驱动：不 force，靠内容指纹决定是否重绘主区
+    refresh({ force: false, reason: 'push' });
   }, 280);
 }
 
@@ -3339,13 +3570,26 @@ function init() {
     }
   });
 
-  refresh({ force: true });
+  // 划选结束后补上被推迟的重绘
+  document.addEventListener('selectionchange', () => {
+    if (!deferredPanelRedraw || hasLiveTextSelectionInPanel()) {
+      return;
+    }
+    deferredPanelRedraw = false;
+    const scroll = capturePanelScrollState();
+    renderMainPanel();
+    restorePanelScrollState(scroll);
+    bindAppEvents();
+    lastRefreshFingerprint = buildRefreshFingerprint();
+  });
+
+  refresh({ force: true, reason: 'user' });
   refreshTimerId = setInterval(() => {
     if (runtimeMessageFailures >= MAX_RUNTIME_MESSAGE_FAILURES) {
       return;
     }
-    // 轮询用增量指纹刷新，禁止 force，避免大包反复 eval 卡死 Panel
-    refresh({ force: false });
+    // 兜底心跳：只同步数据/角标，内容不变不重绘主区
+    refresh({ force: false, reason: 'timer' });
   }, document.hidden ? PANEL_REFRESH_HIDDEN_MS : PANEL_REFRESH_MS);
 }
 

@@ -31,7 +31,7 @@ import { resetSession, getSessionToken } from './lowcode-buffer.js';
 import { setForcedProfileMode, getForcedProfileMode } from './profile-registry.js';
 import { getProfileDetection } from './detect.js';
 import { wrapFormController } from './wrap-consume.js';
-import { installDebugApi } from './debug-store.js';
+import { installDebugApi, clearEpochStore } from './debug-store.js';
 import {
   getHookLiveness,
   unwrapAll,
@@ -59,6 +59,7 @@ import {
 } from './scenario-context.js';
 import { buildRuntimePayload } from './panel-payload.js';
 import { getPanelSyncPayload, getPanelSyncSummary, publishRuntimeToPanel, republishCachedPanelState } from './panel-post.js';
+import { clearPanelSyncCache } from './panel-sync-cache.js';
 
 const allowlistCache = new Map();
 const allowlistConfigCache = new Map();
@@ -257,7 +258,7 @@ function ensureAllowlistForBoName(boName) {
     };
   }
 
-  // registry / webpack / DOM 均未命中 → 引导设置页手工导入
+  // registry / webpack / DOM 均未命中 → 引导概览页手工导入
   return { applied: false, reason: 'need-import', boName };
 }
 
@@ -625,7 +626,7 @@ function ensureStateScopeApi() {
   apiInstalled = true;
   window.__StateScope__ = {
     installed: false,
-    version: '0.8.32',
+    version: '0.8.35',
     mode: 'P2-lowcode-capture',
     getMeta: () => getRuntimeMeta(runtimeContext),
     getDiagnostics: () => getActivationDiagnostics(runtimeContext),
@@ -748,6 +749,12 @@ function ensureStateScopeApi() {
     getPanelSyncPayload: () => getPanelSyncPayload(),
     getPanelSyncSummary: () => getPanelSyncSummary(),
     syncPanelState: () => republishCachedPanelState(),
+    clearPanelCache() {
+      clearPanelSyncCache();
+      clearEpochStore();
+      resetEpochCounter();
+      return { ok: true };
+    },
     getBootstrapStatus: () => getBootstrapStatus(),
     getHookLiveness: () => getHookLiveness(),
     unwrapAll: () => unwrapAll(),

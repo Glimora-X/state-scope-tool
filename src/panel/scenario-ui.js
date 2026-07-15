@@ -487,7 +487,7 @@ window.StateScopeScenarioUI = (function createScenarioUI() {
         if (!catalog?.scenarios?.length) {
           ctx.showToast(
             catalog?.fields?.length ?
-              '这是 allowlist 文件，请到「设置」上传 allowlist；场景包需含 scenarios 数组'
+              '这是 allowlist 文件，请到「概览」上传 allowlist；场景包需含 scenarios 数组'
             : '无效 SSOT：缺少 scenarios 数组'
           );
           return;

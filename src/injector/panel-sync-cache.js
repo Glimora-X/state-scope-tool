@@ -15,6 +15,11 @@ export function cacheEpochPayload(payload) {
   epochPayloadCache.push(...next.slice(0, MAX_CACHED_EPOCHS));
 }
 
+export function clearPanelSyncCache() {
+  runtimePayloadCache = null;
+  epochPayloadCache.length = 0;
+}
+
 export function getPanelSyncPayload() {
   return {
     runtime: runtimePayloadCache,
