@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "StateScope",
-  "version": "0.8.35",
+  "version": "0.8.38",
   "description": "单据状态 L2 shadow 透视 Chrome 扩展（低代码 uiRoot 边界 + 延迟 hook）",
   "icons": {
     "16": "assets/icons/icon-16.png",

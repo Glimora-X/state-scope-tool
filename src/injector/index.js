@@ -626,7 +626,7 @@ function ensureStateScopeApi() {
   apiInstalled = true;
   window.__StateScope__ = {
     installed: false,
-    version: '0.8.35',
+    version: '0.8.38',
     mode: 'P2-lowcode-capture',
     getMeta: () => getRuntimeMeta(runtimeContext),
     getDiagnostics: () => getActivationDiagnostics(runtimeContext),
@@ -753,7 +753,17 @@ function ensureStateScopeApi() {
       clearPanelSyncCache();
       clearEpochStore();
       resetEpochCounter();
-      return { ok: true };
+      // 故意不碰 bizDebug / stateScopeVerbose / stateScopeDebug / stateScopeProfile / allowlist
+      // 激活场景在 localStorage；重置为 catalog 首项（不 localStorage.clear）
+      const boName = getRuntimeMeta(runtimeContext).boName;
+      setScenarioTag('', boName);
+      const scenarioTag = ensureActiveScenarioTag(boName);
+      return {
+        ok: true,
+        scenarioTag,
+        boName: boName || '',
+        bizDebug: localStorage.getItem('bizDebug') === 'true'
+      };
     },
     getBootstrapStatus: () => getBootstrapStatus(),
     getHookLiveness: () => getHookLiveness(),

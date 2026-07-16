@@ -208,6 +208,13 @@ export async function deleteIssue(fingerprint) {
   return true;
 }
 
+/** 清空本地 Issues 与附带 epoch 快照（不影响 Jira 远端） */
+export async function clearAllIssues() {
+  await persistIssueStore(createEmptyStore());
+  await storageSet(SNAPSHOTS_KEY, {});
+  return { ok: true };
+}
+
 export function sanitizeIssueForExport(issue) {
   if (!issue) {
     return issue;

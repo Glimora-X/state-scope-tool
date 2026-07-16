@@ -1,4 +1,4 @@
-const PANEL_VERSION = '0.8.35';
+const PANEL_VERSION = '0.8.38';
 
 const CONSOLE_FILTER_PRESETS = [
   { id: 'action-copy-filter-all', label: 'StateScope', filter: 'StateScope' },
@@ -2751,13 +2751,15 @@ function renderApp() {
 
 async function clearStateScopeCache() {
   if (
-    !window.confirm('清除当前 Tab 的 StateScope 观测缓存？\n不会删除 Jira/Issue、allowlist 绑定与场景包。')
+    !window.confirm(
+      '清除 StateScope 缓存？\n将清空：观测轮次、切流/场景累计、本地 Issues，并把激活场景重置为 catalog 首项。\n保留：bizDebug / 调试开关、allowlist 绑定、场景包、Jira 配置（远端 Jira 单不会删除）。'
+    )
   ) {
     return;
   }
 
   await safeRuntimeMessage({ type: 'SS_CLEAR_CACHE', tabId });
-  await evalInPage(`(function () {
+  const pageClear = await evalInPage(`(function () {
     var ss = window.__StateScope__;
     if (ss && ss.clearPanelCache) return ss.clearPanelCache();
     return { ok: false, error: 'injector 未就绪' };
@@ -2765,15 +2767,19 @@ async function clearStateScopeCache() {
 
   ui.selectedEpochId = null;
   ui.epochFollowLatest = true;
+  ui.scenarioTag = pageClear?.result?.scenarioTag || '';
+  ui.selectedScenarioTag = ui.scenarioTag;
   if (appState) {
     appState.epochs = [];
     appState.selectedEpochId = null;
     appState.cutoverReport = null;
     appState.scenarioReport = null;
+    appState.issues = [];
   }
 
   await refresh({ force: true, reason: 'user' });
-  showToast('StateScope 缓存已清除');
+  const tagHint = ui.scenarioTag ? `，激活场景已重置为 ${ui.scenarioTag}` : '，激活场景已重置';
+  showToast(`StateScope 缓存与本地 Issues 已清除${tagHint}`);
 }
 
 async function exportDiagnosticJson() {
@@ -2806,9 +2812,15 @@ async function copyDiagnoseFromPage() {
   }
 }
 
-function filterDiffRows(rows, hasNewChain) {
+function isLogicMismatchRow(row) {
+  const severity = row?.severity || row?.resultLabel || '';
+  return severity === 'logic-mismatch' || severity === '升级前后不一致';
+}
+
+/** 「仅看升级前后不一致」：只保留 logic-mismatch，不依赖 hasNewChain */
+function filterDiffRows(rows) {
   return (rows || []).filter((row) => {
-    if (ui.diffOnlyMismatch && hasNewChain && row.severity === 'ok') {
+    if (ui.diffOnlyMismatch && !isLogicMismatchRow(row)) {
       return false;
     }
     if (!ui.diffSearch) {
@@ -2830,12 +2842,14 @@ function renderDiffLayer(epoch) {
       `<div class="banner warn">${esc(SHADOW_STORE_MISSING.bannerLowcode)}</div>`
     : `<div class="banner warn">${esc(SHADOW_STORE_MISSING.bannerTraditional)}</div>`;
   const groups = epoch.diffGroups || { main: [], details: [] };
-  const mainRows = filterDiffRows(groups.main, epoch.hasNewChain);
+  const mainRows = filterDiffRows(groups.main);
   const focusPath = ui.diffFocusPath;
 
   const renderRows = (rows) => {
     if (!rows.length) {
-      return '<div class="empty">无匹配对比项</div>';
+      return ui.diffOnlyMismatch ?
+          '<div class="empty">无「升级前后不一致」项（可取消勾选查看全部）</div>'
+        : '<div class="empty">无匹配对比项</div>';
     }
     return rows
       .map((row) => {
@@ -2855,7 +2869,7 @@ function renderDiffLayer(epoch) {
 
   const detailBlocks = (groups.details || [])
     .map((group) => {
-      const rows = filterDiffRows(group.rows, epoch.hasNewChain);
+      const rows = filterDiffRows(group.rows);
       if (!rows.length) {
         return '';
       }

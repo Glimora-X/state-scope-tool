@@ -1,6 +1,6 @@
 import { accumulateCutoverReport, emptyCutoverReport } from './cutover-accumulator.js';
 import { collectIssuesFromEpoch, promoteAnomalyToIssue } from './issue-collector.js';
-import { deleteIssue, listIssues, updateIssue } from './issue-store.js';
+import { clearAllIssues, deleteIssue, listIssues, updateIssue } from './issue-store.js';
 import { exportIssuesMarkdown, syncIssueToJira, testJiraConnection } from './jira-client.js';
 import {
   accumulateScenarioReport,
@@ -497,6 +497,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const fresh = emptyTabState(state.scenarioCatalogPack);
       fresh.runtime = state.runtime;
       tabStore.set(message.tabId, fresh);
+      await clearAllIssues();
       notifyPanelStateUpdated(message.tabId);
       return { ok: true };
     }
