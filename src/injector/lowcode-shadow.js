@@ -32,6 +32,24 @@ function readShadowStoreFromNode(node) {
   return null;
 }
 
+function readReferenceStoreFromNode(node) {
+  if (!node) {
+    return null;
+  }
+  try {
+    const viaGet = node.get?.('referenceStore') || node.get?.('stateReferenceStore');
+    if (viaGet && typeof viaGet === 'object') {
+      return viaGet;
+    }
+  } catch {
+    // ignore
+  }
+  if (node.referenceStore && typeof node.referenceStore === 'object') {
+    return node.referenceStore;
+  }
+  return null;
+}
+
 /**
  * 低代码 shadow 轨：applyStatePatches(mode:shadow) 写入 rootViewModel.shadowStore。
  * 入口可能是 TemplateView.viewModel / root / biz.interlayerViewModel.rootViewModel。
@@ -120,6 +138,79 @@ export function flattenShadowStore(viewModel, bizApp, allowlistConfig) {
 
   Object.assign(flat, flattenAllowlistFieldShadows(viewModel, allowlistConfig));
   return flat;
+}
+
+/**
+ * 旧状态采样轨：EditAble dry-run → rootViewModel.referenceStore（形状同 shadowStore）。
+ * live / shadow 均可有；Diff 旧侧优先用本轨。
+ */
+export function flattenReferenceStore(viewModel, bizApp) {
+  const flat = {};
+  if (!viewModel && !bizApp) {
+    return flat;
+  }
+
+  const card = viewModel?.biz || viewModel?.root?.biz;
+  const nodes = [
+    viewModel,
+    viewModel?.root,
+    card,
+    card?.interlayerViewModel?.rootViewModel,
+    card?.interlayerViewModel,
+    viewModel?.biz?.interlayerViewModel?.rootViewModel,
+    viewModel?.biz?.interlayerViewModel,
+    bizApp?.interlayerViewModel?.rootViewModel,
+    bizApp?.interlayerViewModel,
+    bizApp?.rootViewModel
+  ].filter(Boolean);
+
+  const candidates = [];
+  for (const node of nodes) {
+    pushShadowCandidate(candidates, readReferenceStoreFromNode(node));
+  }
+
+  for (const store of candidates) {
+    flattenShadowStoreObject(store, flat);
+  }
+  return flat;
+}
+
+/** 读 mdfStateLifecycle：URL/localStorage 由运行时写入 rootViewModel */
+export function readMdfStateLifecycle(viewModel, bizApp) {
+  const nodes = [
+    viewModel,
+    viewModel?.root,
+    bizApp?.interlayerViewModel?.rootViewModel,
+    viewModel?.biz?.interlayerViewModel?.rootViewModel
+  ].filter(Boolean);
+  for (const node of nodes) {
+    try {
+      const viaGet = node.get?.('mdfStateLifecycle');
+      if (viaGet === 'live' || viaGet === 'shadow') {
+        return viaGet;
+      }
+    } catch {
+      // ignore
+    }
+    if (node.mdfStateLifecycle === 'live' || node.mdfStateLifecycle === 'shadow') {
+      return node.mdfStateLifecycle;
+    }
+  }
+  try {
+    if (typeof window !== 'undefined') {
+      const fromQuery = new URLSearchParams(window.location.search).get('mdfStateLifecycle');
+      if (fromQuery === 'live' || fromQuery === 'shadow') {
+        return fromQuery;
+      }
+      const fromStorage = window.localStorage?.getItem('mdfStateLifecycle');
+      if (fromStorage === 'live' || fromStorage === 'shadow') {
+        return fromStorage;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 'live';
 }
 
 /** 诊断：shadowStore 与 field.$shadow 是否可读 */

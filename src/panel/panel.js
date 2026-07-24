@@ -1,4 +1,4 @@
-const PANEL_VERSION = '0.8.38';
+const PANEL_VERSION = '0.8.39';
 
 const CONSOLE_FILTER_PRESETS = [
   { id: 'action-copy-filter-all', label: 'StateScope', filter: 'StateScope' },
@@ -10,11 +10,11 @@ const ZH = window.StateScopeZh?.ZH || { epoch: '观测轮次', epochTimeline: '�
 const severityZh = window.StateScopeZh?.severityZh || ((s) => s || '—');
 const epochLabel = window.StateScopeZh?.epochLabel || ((id) => (id == null ? ZH.epoch : `${ZH.epoch} #${id}`));
 const SHADOW_STORE_MISSING = window.StateScopeZh?.SHADOW_STORE_MISSING || {
-  short: '影子未写入',
-  headline: '框架已采到升级前；影子存储未写入',
+  short: '新轨未写入',
+  headline: '框架已采到旧轨；新状态采样未写入',
   subline: 'statePatches 可能已算完，但 shadowStore 无该字段终态（非字段清单/采集框架问题）',
   bannerLowcode:
-    '框架正常：已采到升级前（用户所见）。问题在存储：升级后 shadowStore 未写入。statePatches 有值也不算接入，须 applyStatePatches(shadow) 落盘。',
+    '框架正常：已采到旧状态（reference/可见态）。问题在存储：新状态 shadowStore 未写入。live/shadow 均应 applyStatePatches 落盘 shadowStore。',
   bannerTraditional:
     '框架正常：已采到升级前。问题在存储：升级后结果未写入，当前仅升级前预览。'
 };
@@ -75,7 +75,21 @@ const DEBUG_KEYS = [
 const PROFILE_OPTIONS = [
   { value: 'auto', label: 'auto（自动识别）', desc: '优先运行时信号，hybrid 时用 boName 默认映射' },
   { value: 'traditional', label: 'traditional（系统单据）', desc: 'StateCollector + FormController.refreshView' },
-  { value: 'lowcode', label: 'lowcode（MDF 低代码）', desc: 'getDisable 终值 vs shadowStore / statePatches' }
+  { value: 'lowcode', label: 'lowcode（MDF 低代码）', desc: 'referenceStore 旧轨 vs shadowStore 新轨' }
+];
+
+const MDF_STATE_LIFECYCLE_KEY = 'mdfStateLifecycle';
+const LIFECYCLE_OPTIONS = [
+  {
+    value: 'live',
+    label: 'live（默认）',
+    desc: 'UI 跟 statePatches；双轨仍记 reference + shadowStore'
+  },
+  {
+    value: 'shadow',
+    label: 'shadow（降级）',
+    desc: 'UI 跟 EditAble；对照期特例，提测勿用'
+  }
 ];
 
 let tabId = null;
@@ -1072,6 +1086,24 @@ async function readPageSettings(options = {}) {
       stateScopeAutoAllowlist: localStorage.getItem('stateScopeAutoAllowlist') !== 'false',
       stateScopeProfile: (ss && ss.getProfileMode ? ss.getProfileMode() : null) || localStorage.getItem('stateScopeProfile') || 'auto',
       profileDetection: (ss && ss.getProfileDetection ? ss.getProfileDetection() : null) || null,
+      mdfStateLifecycle: (function () {
+        try {
+          var fromQuery = new URLSearchParams(location.search).get('mdfStateLifecycle');
+          if (fromQuery === 'shadow' || fromQuery === 'live') return fromQuery;
+          var fromStorage = localStorage.getItem('mdfStateLifecycle');
+          if (fromStorage === 'shadow' || fromStorage === 'live') return fromStorage;
+        } catch (e) {}
+        return 'live';
+      })(),
+      mdfStateLifecycleSource: (function () {
+        try {
+          var fromQuery = new URLSearchParams(location.search).get('mdfStateLifecycle');
+          if (fromQuery === 'shadow' || fromQuery === 'live') return 'url';
+          var fromStorage = localStorage.getItem('mdfStateLifecycle');
+          if (fromStorage === 'shadow' || fromStorage === 'live') return 'localStorage';
+        } catch (e) {}
+        return 'default';
+      })(),
       stateScopeInstalled: !!(ss && ss.version),
       stateScopeHooksReady: !!(ss && ss.installed),
       stateScopeVersion: (ss && ss.version) || '',
@@ -1208,6 +1240,32 @@ async function enableAllDebugSettings() {
   }
 
   ui.settingsMessage = `写入失败：${response.result?.error || response.error || '无法在单据页执行 eval'}`;
+  showToast(ui.settingsMessage);
+  return false;
+}
+
+async function applyMdfStateLifecycleAndReload(nextLifecycle) {
+  const mode = nextLifecycle === 'shadow' ? 'shadow' : 'live';
+  const response = await evalInPage(`(function () {
+    var key = ${JSON.stringify(MDF_STATE_LIFECYCLE_KEY)};
+    var mode = ${JSON.stringify(mode)};
+    try {
+      localStorage.setItem(key, mode);
+      var url = new URL(location.href);
+      // URL 优先于 localStorage：同步写入，避免旧 query 盖住面板设置
+      url.searchParams.set(key, mode);
+      location.href = url.toString();
+      return { ok: true, mode: mode };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  })()`);
+  if (response.ok && response.result?.ok !== false) {
+    ui.settingsMessage = `mdfStateLifecycle 已设为 ${mode}，正在刷新单据页…`;
+    showToast(ui.settingsMessage);
+    return true;
+  }
+  ui.settingsMessage = `切换失败：${response.result?.error || response.error || '无法在单据页执行 eval'}`;
   showToast(ui.settingsMessage);
   return false;
 }
@@ -2943,12 +3001,13 @@ function renderOverview() {
   <div class="overview-cockpit">
     ${renderOverviewStatusCard(epoch, activation)}
     ${renderDevToolsSettingsCard(ps)}
+    ${renderLifecycleSettingsCard(ps)}
     ${renderProfileSettingsCard(ps)}
     ${renderAllowlistSettingsCard(ps)}
   </div>
   <div class="hint-cards">
     <div class="hint-card"><strong>时间线</strong>侧栏「观测时间线」查看最近轮次与字段终态详情。</div>
-    <div class="hint-card"><strong>对比</strong>优先关注「升级前后不一致」。「影子未写入」= 框架已采到升级前、问题在 shadowStore。</div>
+    <div class="hint-card"><strong>对比</strong>优先关注「升级前后不一致」。旧轨=referenceStore（缺省回退可见态）；新轨=shadowStore（live/shadow 均应写入）。</div>
     <div class="hint-card"><strong>Allowlist</strong>绑定状态在页眉；导入/清除在本页 Allowlist 区。</div>
   </div>`;
 }
@@ -3010,6 +3069,33 @@ function renderDevToolsSettingsCard(ps) {
       <button type="button" class="btn" id="rediscover-hooks">重新挂 Hook</button>
     </div>
     ${rows}
+  </div>`;
+}
+
+function renderLifecycleSettingsCard(ps) {
+  const lifecycle = ps.mdfStateLifecycle === 'shadow' ? 'shadow' : 'live';
+  const source = ps.mdfStateLifecycleSource || 'default';
+  const sourceLabel =
+    source === 'url' ? 'URL 参数' : source === 'localStorage' ? 'localStorage' : '运行时默认';
+  const opt = LIFECYCLE_OPTIONS.find((item) => item.value === lifecycle) || LIFECYCLE_OPTIONS[0];
+  const toggleTo = lifecycle === 'live' ? 'shadow' : 'live';
+  const toggleLabel = toggleTo === 'shadow' ? '切换为 shadow 并刷新' : '切换为 live 并刷新';
+
+  return `<div class="card overview-panel">
+    <div class="card-head">状态切流（mdfStateLifecycle）</div>
+    <div class="settings-row">
+      <div>
+        <div>${esc(opt.label)}</div>
+        <div class="subtle">${esc(opt.desc)} · 来源 ${esc(sourceLabel)}</div>
+      </div>
+      <span class="chip ${lifecycle === 'live' ? 'on' : 'off'}">${esc(lifecycle)}</span>
+    </div>
+    <div class="subtle" style="margin-top:6px">写入单据页 localStorage，并同步 URL 参数后刷新；EditAble bind 与 apply 模式一并切换。默认 live；shadow 仅降级对照。</div>
+    <div class="settings-actions">
+      <button type="button" class="btn primary" id="toggle-mdf-lifecycle" data-lifecycle="${toggleTo}">${esc(toggleLabel)}</button>
+      <button type="button" class="btn" id="apply-mdf-lifecycle-live" data-lifecycle="live">设为 live 并刷新</button>
+      <button type="button" class="btn" id="apply-mdf-lifecycle-shadow" data-lifecycle="shadow">设为 shadow 并刷新</button>
+    </div>
   </div>`;
 }
 
@@ -3258,6 +3344,17 @@ function bindAppEvents() {
   });
 
   document.getElementById('reload-page')?.addEventListener('click', reloadInspectedPage);
+
+  const applyLifecycle = async (event) => {
+    const mode = event.currentTarget?.getAttribute('data-lifecycle');
+    if (!mode) {
+      return;
+    }
+    await applyMdfStateLifecycleAndReload(mode);
+  };
+  document.getElementById('toggle-mdf-lifecycle')?.addEventListener('click', applyLifecycle);
+  document.getElementById('apply-mdf-lifecycle-live')?.addEventListener('click', applyLifecycle);
+  document.getElementById('apply-mdf-lifecycle-shadow')?.addEventListener('click', applyLifecycle);
 
   document.getElementById('apply-profile-mode')?.addEventListener('click', async () => {
     const mode = document.getElementById('profile-mode-select')?.value || 'auto';

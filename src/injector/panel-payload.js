@@ -69,7 +69,7 @@ function enrichDiffRow(row, hasNewChain, profile) {
 /**
  * 解析 Diff 旧侧（old-side）快照。
  *
- * - lowcode：返回 finalSnap（即可见态），Diff 旧侧 = 用户所见终态
+ * - lowcode：referenceStore / 回退可见态（finalSnap），Diff 旧侧 = 迁移前规则语义
  * - traditional：返回 oldSnap 或 finalSnap（取决于 phase 和 scope）
  */
 function resolveOldSnapForDiff(epoch, profile) {
@@ -95,7 +95,7 @@ function resolveOldSnapForDiff(epoch, profile) {
 /**
  * 解析 Diff 新侧（new-side）快照。
  *
- * - lowcode：返回 shadowSnap（影子态），Diff 新侧 = shadowStore 终态
+ * - lowcode：shadowSnap = shadowStore（migrated；live/shadow 均写入）
  * - traditional：返回 newSnap（升级后链路终态）
  */
 function resolveNewSnapForDiff(epoch, profile) {
@@ -215,8 +215,14 @@ export function buildPanelEpochPayload(epoch, meta, allowlistConfig) {
     bootstrapQuality: epoch.bootstrapQuality || undefined,
     visibleSnap: profile === 'lowcode' ? oldSnapForDiff : undefined,
     shadowSnap: profile === 'lowcode' ? newSnapForDiff : undefined,
+    lifecycle: epoch.lifecycle,
     diffAxis: profile === 'lowcode'
-      ? { old: 'visibleSnap (用户所见)', new: 'shadowSnap (影子终态)' }
+      ? {
+          old: epoch.diffAxis?.old === 'visibleSnap'
+            ? 'visibleSnap (回退·用户所见)'
+            : 'referenceSnap (旧轨)',
+          new: 'shadowSnap (新轨/migrated)'
+        }
       : { old: 'oldSnap (操作前)', new: 'newSnap (操作后)' }
   };
 }

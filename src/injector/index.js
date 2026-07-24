@@ -682,7 +682,7 @@ function ensureStateScopeApi() {
     getDiffModel: () => ({
       profile: runtimeContext.profile,
       axis: runtimeContext.profile === 'lowcode'
-        ? { oldSide: 'visibleSnap (finalSnap)', newSide: 'shadowSnap', description: '可见态 vs 影子态' }
+        ? { oldSide: 'referenceSnap (旧轨)', newSide: 'shadowSnap (新轨/migrated)', description: '旧状态 vs 新状态（lifecycle 无关）' }
         : { oldSide: 'oldSnap', newSide: 'newSnap', description: '操作前 vs 操作后' }
     }),
     getProfileDetection: () => getProfileDetection(runtimeContext),

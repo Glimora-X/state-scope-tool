@@ -1,15 +1,14 @@
 /**
- * 低代码（lowcode）取证模型
+ * 低代码（lowcode）取证模型 — 双轨常驻
  *
- * Diff 轴：可见态（visibleSnap）vs 影子态（shadowSnap）
- * - 可见态 = 用户所见 / getDisable·getVisible 读路径 / fieldModel 终态
- * - 影子态 = shadowStore / applyStatePatches 写入的升级后状态
+ * Diff 轴：旧状态（reference）vs 新状态（migrated / shadowStore）
+ * - referenceSnap = referenceStore（EditAble dry-run）；缺省时回退 visibleSnap（对照期兼容）
+ * - migratedSnap  = shadowStore（applyStatePatches 在 shadow/live 均写入）
+ * - visibleSnap   = 用户所见（shadow≈旧 / live≈新），供 UI 驱动校验与场景断言
  *
- * 映射到 epoch 字段：
- *   oldSnap   ← visibleSnap（命名残留，与 traditional 含义不同）
- *   finalSnap ← visibleSnap（同 oldSnap，用于兼容传统线消费逻辑）
- *   newSnap   ← 通常为空
- *   shadowSnap← shadowStore 终态
+ * epoch 字段映射：
+ *   oldSnap / finalSnap ← referenceSnap（优先）或 visibleSnap
+ *   shadowSnap          ← migratedSnap（shadowStore）
  */
 import { isWrapped, markWrapped, unmarkWrapped } from './discover.js';
 import { registerHook, markTriggered } from './hook-registry.js';
@@ -27,7 +26,12 @@ import {
   LOWCODE_STATE_TYPES,
   sampleAllowlistFieldStatesFromViewModel as sampleAllowlistFields
 } from './lowcode-sample.js';
-import { flattenShadowStore, probeShadowSources } from './lowcode-shadow.js';
+import {
+  flattenShadowStore,
+  flattenReferenceStore,
+  probeShadowSources,
+  readMdfStateLifecycle
+} from './lowcode-shadow.js';
 import { scopeLog } from './safe-log.js';
 
 /** 与 OutsourceIssue StateTypeEnum / shadowStore __properties__ 对齐 */
@@ -251,9 +255,10 @@ export function sampleAllowlistFieldStatesFromViewModel(viewModel, allowlistConf
 }
 
 /**
- * 低代码 L2 结果采样：
- * - final/old = 用户所见（fieldModel / column disabled + getDisable 读路径）
- * - shadow = shadowStore 终态（visible + disabled）
+ * 低代码 L2 结果采样（双轨常驻）：
+ * - Diff 旧 = referenceStore（优先）或 visibleSnap（回退）
+ * - Diff 新 = shadowStore（migrated；live 亦写入）
+ * - visibleSnap 写入 meta，供确认 UI 驱动方
  */
 export function commitLowcodeEpoch(
   epochManager,
@@ -277,20 +282,23 @@ export function commitLowcodeEpoch(
   const { viewModel, allowlistConfig } = getContext() || {};
   const root = resolveRootViewModel(viewModel);
   const bizApp = bizAppHint || discoverMdfBizApplication(viewModel);
+  const lifecycle = readMdfStateLifecycle(root, bizApp);
 
   const token = getSessionToken();
   const shadowSnap = flattenShadowStore(root, bizApp, allowlistConfig) || {};
+  const referenceSnap = flattenReferenceStore(root, bizApp) || {};
   const shadowCaptured = Object.keys(shadowSnap).length > 0;
+  const referenceCaptured = Object.keys(referenceSnap).length > 0;
   if (shadowCaptured) {
     bufferLowcodeShadow(shadowSnap, token);
   }
 
   const visibleSnap = sampleAllowlistFieldStatesFromViewModel(viewModel, allowlistConfig);
-  if (Object.keys(visibleSnap).length) {
-    // lowcode 模式下 oldSnap 与 finalSnap 均写入可见态（visibleSnap），
-    // 因为 Diff 旧侧取 finalSnap 作为"用户所见"，oldSnap 仅为兼容保留
-    bufferLowcodeOld(visibleSnap, token);
-    bufferLowcodeFinal(visibleSnap, token);
+  // Diff 旧侧：有 referenceStore 用旧轨；否则回退可见态（对照期未挂 dry-run 时兼容）
+  const oldForDiff = referenceCaptured ? referenceSnap : visibleSnap;
+  if (Object.keys(oldForDiff).length) {
+    bufferLowcodeOld(oldForDiff, token);
+    bufferLowcodeFinal(oldForDiff, token);
   }
 
   const pending = peekLowcodePending();
@@ -298,14 +306,22 @@ export function commitLowcodeEpoch(
     Object.keys(pending.old).length +
       Object.keys(pending.final).length +
       Object.keys(pending.shadow).length +
-      Object.keys(shadowSnap).length >
+      Object.keys(shadowSnap).length +
+      Object.keys(referenceSnap).length +
+      Object.keys(visibleSnap).length >
     0;
 
   if (!hasAny) {
     return false;
   }
 
-  const fingerprint = stableSnapFingerprint(pending.final, pending.shadow, shadowSnap, visibleSnap);
+  const fingerprint = stableSnapFingerprint(
+    pending.final,
+    pending.shadow,
+    shadowSnap,
+    referenceSnap,
+    visibleSnap
+  );
   if (!force && shouldSkipDuplicateEpoch(String(trigger), fingerprint)) {
     return false;
   }
@@ -317,16 +333,34 @@ export function commitLowcodeEpoch(
   const bootstrapQuality = isBootstrap ? (shadowCaptured ? 'complete' : 'partial') : undefined;
 
   epochManager.beginEpoch(String(trigger), phase);
-  epochManager.setMeta?.({ isBootstrap, shadowCaptured, bootstrapQuality });
+  epochManager.setMeta?.({
+    isBootstrap,
+    shadowCaptured,
+    referenceCaptured,
+    bootstrapQuality,
+    lifecycle,
+    visibleSnap,
+    diffAxis: {
+      old: referenceCaptured ? 'referenceStore' : 'visibleSnap',
+      new: 'shadowStore'
+    }
+  });
   if (shadowCaptured) {
     epochManager.recordShadow?.(shadowSnap);
   }
-  if (Object.keys(visibleSnap).length) {
-    epochManager.recordFinal?.(visibleSnap);
-    epochManager.recordOld?.(visibleSnap);
+  if (Object.keys(oldForDiff).length) {
+    epochManager.recordFinal?.(oldForDiff);
+    epochManager.recordOld?.(oldForDiff);
   }
   epochManager.commitEpoch();
-  return { committed: true, shadowCaptured, isBootstrap, bootstrapQuality };
+  return {
+    committed: true,
+    shadowCaptured,
+    referenceCaptured,
+    isBootstrap,
+    bootstrapQuality,
+    lifecycle
+  };
 }
 
 function scheduleUiStateEpochCommit(epochManager, getContext, bizApp) {
@@ -584,7 +618,11 @@ export function wrapMdfBizApplication(bizApp, epochManager, getContext = () => (
             currentToken
           );
           if (statePatches && Object.keys(statePatches).length) {
-            bufferLowcodeShadowFromPatches(statePatches, 'shadow', currentToken);
+            const mode =
+              bizApp?.statePatchApplyMode ||
+              readMdfStateLifecycle(resolveRootViewModel(vm), bizApp) ||
+              'shadow';
+            bufferLowcodeShadowFromPatches(statePatches, mode, currentToken);
           }
         } catch {
           // ignore

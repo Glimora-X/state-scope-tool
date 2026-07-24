@@ -57,7 +57,8 @@ export function bufferLowcodeShadow(entries, sessionToken) {
 }
 
 export function bufferLowcodeShadowFromPatches(statePatches, mode = 'shadow', sessionToken) {
-  if (!statePatches || mode !== 'shadow') {
+  // live 亦并行写 shadowStore；patches 侧预缓冲同样有效
+  if (!statePatches || (mode !== 'shadow' && mode !== 'live')) {
     return;
   }
   bufferLowcodeShadow(captureStatePatchesAsSnap(statePatches), sessionToken);
